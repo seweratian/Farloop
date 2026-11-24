@@ -1425,6 +1425,15 @@ static void lossStatsThreadFunc(void* context) {
 
             // Farloop：码率自适应算出了新码率，告诉被控端（Farloop 改过的 Sunshine 认 0x55F0）
             {
+                int fps = farloopRateTakePendingFps();
+                if (fps > 0) {
+                    uint32_t lf = LE32((uint32_t)fps);
+                    if (!sendMessageAndForget(0x55F1, sizeof(lf), &lf, CTRL_CHANNEL_URGENT, ENET_PACKET_FLAG_RELIABLE, false)) {
+                        Limelog("Farloop: sending frame rate failed: %d\n", (int)LastSocketError());
+                    } else {
+                        Limelog("Farloop: frame rate -> %d fps\n", fps);
+                    }
+                }
                 int kbps = farloopRateTakePending();
                 if (kbps > 0) {
                     uint32_t le = LE32((uint32_t)kbps);

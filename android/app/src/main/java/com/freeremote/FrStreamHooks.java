@@ -88,6 +88,12 @@ public final class FrStreamHooks {
 
     public static void noteStream(int w, int h, int fps) { streamW = w; streamH = h; streamFps = fps; }
 
+    /** 被控端的 Sunshine 支持串流中途改帧率（电脑端 Farloop 0.21 起报告 LiveFramerate） */
+    public static boolean liveFramerate(android.content.Context c, String host) {
+        com.google.gson.JsonObject info = FrHub.get(c).deviceInfo(host);
+        return info != null && info.has("LiveFramerate") && info.get("LiveFramerate").getAsBoolean();
+    }
+
     /** 画面开始失败（例如偶尔的“无法连接 DESKTOP-xxx”）：同一台电脑 60 秒内自动重试一次，不弹错误框 */
     private static final java.util.Map<String, Long> lastAutoRetry = new java.util.concurrent.ConcurrentHashMap<>();
 

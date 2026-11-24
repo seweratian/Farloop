@@ -1280,7 +1280,8 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             try { displays = HostDisplays.List().ToArray(); current = HostDisplays.CurrentId(); } catch { }
         }
         return new DeviceInfoMsg(Config.DeviceName, Config.VirtualIp, l.Macs, l.Broadcast, l.GatewayMac, PeerSession.Version, displays, current,
-            AdaptiveBitrate: Config.AllowControl && SunshineFarloop.Active);
+            AdaptiveBitrate: Config.AllowControl && SunshineFarloop.Active,
+            LiveFramerate: Config.AllowControl && SunshineFarloop.Active); // 0.21 起内置的定制版 Sunshine 支持串流中途改帧率（0x55F1）
     }
 
     KnownDevice? Known(string ip) { lock (Config.KnownDevices) return Config.KnownDevices.FirstOrDefault(k => k.Ip == ip); }

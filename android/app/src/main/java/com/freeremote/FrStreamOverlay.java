@@ -958,9 +958,16 @@ public final class FrStreamOverlay {
             int[] want = res[0] == 0 ? FrStreamHooks.adaptiveResolution(game, host) : null;
             boolean sameRes = res[0] == 0 && (want == null || Math.max(want[0], want[1]) == Math.max(FrStreamHooks.streamW, FrStreamHooks.streamH));
             boolean live = com.limelight.nvstream.jni.MoonBridge.farloopGetBitrateKbps() > 0;
-            if (live && sameRes && fps[0] == FrStreamHooks.streamFps) {
+            boolean fpsSame = fps[0] == FrStreamHooks.streamFps;
+            boolean fpsLive = fpsSame || FrStreamHooks.liveFramerate(game, host);
+            if (live && sameRes && fpsLive) {
+                // 分辨率没变：码率、帧率都当场生效，画面不断
                 com.limelight.nvstream.jni.MoonBridge.farloopSetCap(kbps[0]);
-                Toast.makeText(game, "已应用：码率上限 " + kbps[0] / 1000 + "M", Toast.LENGTH_SHORT).show();
+                if (!fpsSame) {
+                    com.limelight.nvstream.jni.MoonBridge.farloopSetFps(fps[0]);
+                    FrStreamHooks.streamFps = fps[0];
+                }
+                Toast.makeText(game, "已应用：" + fps[0] + "fps · 码率上限 " + kbps[0] / 1000 + "M", Toast.LENGTH_SHORT).show();
                 return;
             }
             Toast.makeText(game, "已保存：" + FrStreamHooks.customSummary(game) + "，几秒后自动重连", Toast.LENGTH_LONG).show();

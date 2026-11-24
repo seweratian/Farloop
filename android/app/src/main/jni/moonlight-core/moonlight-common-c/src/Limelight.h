@@ -569,6 +569,8 @@ bool LiGetEstimatedRttInfo(uint32_t* estimatedRtt, uint32_t* estimatedRttVarianc
 void LiFarloopSetAdaptive(bool enabled);
 // Farloop: bitrate cap for the chosen quality tier (kbps, 0 = none). Can be changed mid-stream (seamless quality switch).
 void LiFarloopSetCap(int kbps);
+// Farloop: change the stream's frame rate mid-stream (host must run Farloop's Sunshine 0.21+)
+void LiFarloopSetFps(int fps);
 // Bitrate the host is currently asked to encode at (kbps), 0 when adaptive bitrate is off
 int LiFarloopGetBitrateKbps(void);
 // Network queueing delay of the latest frame (ms)

@@ -30,7 +30,8 @@ typedef struct { double owd; uint64_t at; } FR_MIN;
 typedef struct { uint64_t arrived; uint64_t before; double queue; } FR_SAMPLE;
 
 static bool frEnabled;          // Java 打开（被控端支持时）
-static volatile int frCapKbps;  // 画质档位的码率上限（0 = 用开始串流时的码率）；串流中可以改，立即生效
+static volatile int frCapKbps;
+static volatile int frPendingFps;  // 等着发给被控端的帧率（0 = 没有）  // 画质档位的码率上限（0 = 用开始串流时的码率）；串流中可以改，立即生效
 static int frTargetKbps;        // 上限 = 开始串流时的码率
 static double frEstimate;
 static int frApplied;
@@ -115,8 +116,20 @@ int LiFarloopGetQueueDelayMs(void) {
     return frLastQueueMs;
 }
 
+// 串流中途改帧率（被控端是 0.21 起的 Farloop 定制版 Sunshine：消息 0x55F1，采集节奏当场换、NVENC 重配置）
+void LiFarloopSetFps(int fps) {
+    if (fps >= 10 && fps <= 240) frPendingFps = fps;
+}
+
+int farloopRateTakePendingFps(void) {
+    int f = frPendingFps;
+    frPendingFps = 0;
+    return f;
+}
+
 // 每次开始串流时（initializeControlStream）调用
 void farloopRateInit(void) {
+    frPendingFps = 0;
     frReset();
     int ceiling = StreamConfig.bitrate > 0 ? StreamConfig.bitrate : 20000;
     frTargetKbps = (frCapKbps > 0 && frCapKbps < ceiling) ? frCapKbps : ceiling;
