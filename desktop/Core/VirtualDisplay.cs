@@ -63,13 +63,13 @@ public static class VirtualDisplay
     }
 
     /// <summary>驱动读取的设置：分辨率列表里放上实体主屏的分辨率，虚拟屏才能设成一样大</summary>
-    static void WriteSettings(IEnumerable<(int W, int H)> extra, int count = 1)
+    static void WriteSettings(IEnumerable<(int W, int H)> extra, int count = 1, string gpu = "default")
     {
         Directory.CreateDirectory(Dir);
         var res = new List<(int, int)> { (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160) };
         foreach (var r in extra) if (!res.Contains(r) && r.W >= 640 && r.H >= 480) res.Add(r);
         var sb = new StringBuilder();
-        sb.Append($"<?xml version='1.0' encoding='utf-8'?>\n<vdd_settings>\n  <monitors><count>{Math.Clamp(count, 1, 4)}</count></monitors>\n  <gpu><friendlyname>default</friendlyname></gpu>\n  <global>\n");
+        sb.Append($"<?xml version='1.0' encoding='utf-8'?>\n<vdd_settings>\n  <monitors><count>{Math.Clamp(count, 1, 4)}</count></monitors>\n  <gpu><friendlyname>{System.Security.SecurityElement.Escape(gpu)}</friendlyname></gpu>\n  <global>\n");
         foreach (var hz in new[] { 30, 60, 90, 120, 144, 165 }) sb.Append($"    <g_refresh_rate>{hz}</g_refresh_rate>\n");
         sb.Append("  </global>\n  <resolutions>\n");
         foreach (var (w, h) in res) sb.Append($"    <resolution><width>{w}</width><height>{h}</height><refresh_rate>60</refresh_rate></resolution>\n");
@@ -134,7 +134,11 @@ public static class VirtualDisplay
         if (layout.Count == 0) layout.Add(new Screen1(w, h, 0, 0, true));
         _layout = layout;
         lock (Gate) { _savedPaths = paths; _savedModes = modes; }
-        WriteSettings(layout.Select(l => (l.W, l.H)).Append((w, h)), layout.Count);
+        // 虚拟屏要在“主屏所在的那块显卡”上渲染：双显卡笔记本（Intel 核显 + NVIDIA 独显）上驱动默认用独显，
+        // 而 Sunshine 启动时按主屏选的是核显的编码器（QuickSync），虚拟屏到了独显上就编不了码，画面停住、连接被断开（实测）
+        var gpu = PrimaryRenderAdapter();
+        Log.Info($"虚拟屏使用显卡：{gpu}");
+        WriteSettings(layout.Select(l => (l.W, l.H)).Append((w, h)), layout.Count, gpu);
         Directory.CreateDirectory(Dir);
         File.WriteAllText(ActiveFlag, DateTime.Now.ToString("s"));
 
@@ -210,6 +214,27 @@ public static class VirtualDisplay
     }
 
     static (int W, int H)? _lastRes;
+
+    /// <summary>主屏所在的显卡名（如 “Intel(R) UHD Graphics”）；主屏本身是虚拟屏（UU 等）或读不到时返回 "default"（驱动自己选）</summary>
+    static string PrimaryRenderAdapter()
+    {
+        try
+        {
+            for (uint i = 0; ; i++)
+            {
+                var dd = new DISPLAY_DEVICE { cb = Marshal.SizeOf<DISPLAY_DEVICE>() };
+                if (!EnumDisplayDevicesW(null, i, ref dd, 0)) break;
+                const int ATTACHED = 1, PRIMARY = 4;
+                if ((dd.StateFlags & ATTACHED) == 0 || (dd.StateFlags & PRIMARY) == 0) continue;
+                var name = (dd.DeviceString ?? "").Trim();
+                string[] notGpu = { "Virtual", "IDD", "GameViewer", "Parsec", "Basic Display", "Basic Render", "Mtt", "VDD", "Remote" };
+                if (name == "" || notGpu.Any(n => name.Contains(n, StringComparison.OrdinalIgnoreCase))) return "default";
+                return name;
+            }
+        }
+        catch { }
+        return "default";
+    }
 
     /// <summary>息屏前一块实体屏的样子（源模式：分辨率、桌面上的位置）</summary>
     public sealed record Screen1(int W, int H, int X, int Y, bool Primary);

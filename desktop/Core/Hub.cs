@@ -265,7 +265,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         }
     }
 
-    bool _prepTried, _farloopSunshineDone, _sunshineFailShown;
+    bool _prepTried, _farloopSunshineDone, _sunshineFailShown, _ddReset;
     readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _mobileIps = new();
     readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _gone = new();
 
@@ -348,6 +348,11 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
                 _farloopSunshineDone = true;
                 var why = await SunshineFarloop.EnsureAsync();
                 if (why != null) Log.Info("码率自适应：" + why);
+            }
+            if (Config.AllowControl && !_ddReset && Sunshine.IsRunning)
+            {
+                _ddReset = true;
+                await Sunshine.ResetDisplayPersistenceAsync(Config);
             }
             if (Config.AllowControl)
             {

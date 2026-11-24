@@ -181,6 +181,27 @@ public static class Sunshine
 
     public static string LogPath => Path.Combine(Path.GetDirectoryName(Exe)!, "config", "sunshine.log");
 
+    /// <summary>
+    /// 清掉 Sunshine 记着的“要还原的显示设置”（/api/reset-display-device-persistence）。
+    /// 实测：它记着一个早已不存在的显示器，每次启动、每次结束串流、每次显示器增减都去“还原”，还原失败就“启用所有显示器”，
+    /// 息屏时刚撤下的实体屏就被它接回来了。Farloop 启动时和每次息屏前清一次
+    /// </summary>
+    public static async Task ResetDisplayPersistenceAsync(AppConfig cfg)
+    {
+        if (!Installed || !IsRunning || cfg.SunshineUser == "") return;
+        try
+        {
+            using var handler = new HttpClientHandler { ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic",
+                Convert.ToBase64String(Encoding.UTF8.GetBytes($"{cfg.SunshineUser}:{cfg.SunshinePassword}")));
+            http.DefaultRequestHeaders.Add("Origin", "https://localhost:47990");
+            var r = await http.PostAsync("https://localhost:47990/api/reset-display-device-persistence", new StringContent("", Encoding.UTF8, "application/json"));
+            Log.Info($"清除 Sunshine 记着的显示设置：{(int)r.StatusCode}");
+        }
+        catch (Exception e) { Log.Info("清除 Sunshine 记着的显示设置失败：" + e.Message); }
+    }
+
     static bool _repairTried;
 
     /// <summary>SunshineService 登记的程序路径（sc qc 的 BINARY_PATH_NAME），服务不存在时返回 null</summary>

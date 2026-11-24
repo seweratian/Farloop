@@ -45,6 +45,7 @@ public static class PrivacyScreen
             Log.Info("隐私屏 开启（虚拟屏，熄灭显示器）");
             _ = System.Threading.Tasks.Task.Run(async () =>
             {
+                await Core.Sunshine.ResetDisplayPersistenceAsync(Hub.I.Config); // 别让 Sunshine 把刚撤下的实体屏“还原”回来
                 var err = await VirtualDisplay.EnterAsync();
                 if (err == null) { await System.Threading.Tasks.Task.Delay(1500); Hub.I.BroadcastSelfInfo(); return; }
                 Log.Error("虚拟屏息屏失败，改用黑色遮罩：" + err);
