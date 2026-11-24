@@ -528,9 +528,25 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         foreground = false;
     }
 
-    /** Farloop：解码器支持自适应播放（同一个解码器里换成不超过开始尺寸的分辨率，不用重建） */
+    /** Farloop：解码器支持自适应播放（同一个解码器里换成不超过最大尺寸的分辨率，不用重建） */
     public boolean isAdaptivePlayback() {
         return adaptivePlayback;
+    }
+
+    // Farloop：解码器按多大的画面准备（串流方向的宽高）。开始串流可以比它小，之后不重连升到它为止
+    private int frWantMaxW, frWantMaxH;
+    private MediaCodecInfo frSelectedDecoder;
+    private volatile int frMaxW, frMaxH;
+
+    /** 在 setup 之前调用：希望解码器能接受的最大画面（一般是电脑屏幕原生尺寸） */
+    public void setFarloopMaxSize(int width, int height) {
+        frWantMaxW = width;
+        frWantMaxH = height;
+    }
+
+    /** 解码器实际按多大准备的（串流方向 {宽, 高}）；还没建好时为 null */
+    public int[] getFarloopMaxStreamSize() {
+        return frMaxW > 0 ? new int[]{frMaxW, frMaxH} : null;
     }
 
     public int getActiveVideoFormat() {
@@ -547,8 +563,27 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         // Populate keys for adaptive playback
         if (adaptivePlayback) {
-            videoFormat.setInteger(MediaFormat.KEY_MAX_WIDTH, initialWidth);
-            videoFormat.setInteger(MediaFormat.KEY_MAX_HEIGHT, initialHeight);
+            int maxW = initialWidth, maxH = initialHeight;
+            // Farloop：按电脑屏幕的尺寸准备（解码器支持才行），这样开始时用小分辨率，之后也能不重连切到大的
+            int wantW = invertResolution ? frWantMaxH : frWantMaxW;
+            int wantH = invertResolution ? frWantMaxW : frWantMaxH;
+            if (wantW >= initialWidth && wantH >= initialHeight && (wantW > initialWidth || wantH > initialHeight)) {
+                boolean ok = false;
+                try {
+                    ok = frSelectedDecoder != null && frSelectedDecoder.getCapabilitiesForType(mimeType).getVideoCapabilities().isSizeSupported(wantW, wantH);
+                } catch (Exception e) {
+                    LimeLog.warning("Farloop: decoder size check failed: " + e);
+                }
+                if (ok) {
+                    maxW = wantW;
+                    maxH = wantH;
+                }
+                LimeLog.info("Farloop: decoder max size " + maxW + "x" + maxH + " (stream starts at " + initialWidth + "x" + initialHeight + ", wanted " + wantW + "x" + wantH + ")");
+            }
+            videoFormat.setInteger(MediaFormat.KEY_MAX_WIDTH, maxW);
+            videoFormat.setInteger(MediaFormat.KEY_MAX_HEIGHT, maxH);
+            frMaxW = invertResolution ? maxH : maxW;
+            frMaxH = invertResolution ? maxW : maxH;
         }
 
         // Android 7.0 adds color options to the MediaFormat
@@ -756,6 +791,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             return -3;
         }
         adaptivePlayback = MediaCodecHelper.decoderSupportsAdaptivePlayback(selectedDecoderInfo, mimeType);
+        frSelectedDecoder = selectedDecoderInfo;
         fusedIdrFrame = MediaCodecHelper.decoderSupportsFusedIdrFrame(selectedDecoderInfo, mimeType);
 
         for (int tryNumber = 0;; tryNumber++) {

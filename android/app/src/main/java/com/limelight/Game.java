@@ -787,6 +787,15 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         displayHeight = frSize.getHeight();
         frCurW = displayWidth;
         frCurH = displayHeight;
+        // Farloop：被控端能串流中途改分辨率时，解码器按电脑屏幕尺寸准备，开始时用小分辨率之后也能不重连升上去
+        if (frAdaptiveOn && decoderRenderer != null && com.freeremote.FrStreamHooks.liveResolution(this, host)) {
+            int[] hs = com.freeremote.FrStreamHooks.hostResolution(this, host);
+            if (hs != null) {
+                int mw = displayHeight > displayWidth ? hs[1] : hs[0];
+                int mh = displayHeight > displayWidth ? hs[0] : hs[1];
+                decoderRenderer.setFarloopMaxSize(mw, mh);
+            }
+        }
         if (frAdaptiveOn) {
             com.limelight.nvstream.jni.MoonBridge.farloopSetCap(frBitrate);
             frBitrate = Math.max(frBitrate, com.freeremote.FrStreamHooks.ADAPTIVE_CEILING_KBPS);
@@ -1062,10 +1071,16 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
      */
     public boolean frApplySelectedSize() {
         android.util.Size wanted = farloopStreamSize(PreferenceConfiguration.readPreferences(this));
+        // 解码器按多大准备的（被控端支持时是电脑屏幕尺寸，否则是开始时的尺寸）
+        int maxW = displayWidth, maxH = displayHeight;
+        int[] dm = decoderRenderer != null ? decoderRenderer.getFarloopMaxStreamSize() : null;
+        if (dm != null && dm[0] >= displayWidth && dm[1] >= displayHeight) { maxW = dm[0]; maxH = dm[1]; }
         int tw = displayWidth, th = displayHeight;
         if (wanted.getWidth() != displayWidth || wanted.getHeight() != displayHeight) {
             double s = (double) Math.min(wanted.getWidth(), wanted.getHeight()) / Math.min(displayWidth, displayHeight);
-            if (s > 1.001) return false; // 比开始时大
+            double maxS = Math.min((double) maxW / displayWidth, (double) maxH / displayHeight);
+            if (s > maxS * 1.01 && maxW == displayWidth && maxH == displayHeight) return false; // 比开始时大，解码器也没多准备：只能重连
+            s = Math.min(s, maxS); // 超过电脑屏幕（或宽高比不同）：按能放下的最大来
             tw = (int) Math.round(displayWidth * s) & ~1;
             th = (int) Math.round(displayHeight * s) & ~1;
             if (tw < 320 || th < 240) return false;

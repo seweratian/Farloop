@@ -46,6 +46,11 @@ public final class FrStreamHooks {
      */
     public static int[] adaptiveResolution(android.content.Context c, String host) {
         if (quality(c) >= QUALITY.length && customRes(c) != 0) return null; // 自定义且指定了分辨率：按指定的来
+        return hostResolution(c, host);
+    }
+
+    /** 电脑当前屏幕的尺寸（最高 4K），{宽, 高}；不知道就返回 null */
+    public static int[] hostResolution(android.content.Context c, String host) {
         com.google.gson.JsonObject info = FrHub.get(c).deviceInfo(host);
         if (info == null || !info.has("Displays") || !info.get("Displays").isJsonArray()) return null;
         String cur = info.has("CurrentDisplay") && !info.get("CurrentDisplay").isJsonNull() ? info.get("CurrentDisplay").getAsString() : "";
