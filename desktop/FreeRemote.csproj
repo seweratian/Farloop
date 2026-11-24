@@ -11,7 +11,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>FreeRemote</AssemblyName>
     <RootNamespace>FreeRemote</RootNamespace>
-    <Version>0.21.0</Version>
+    <Version>0.21.1</Version>
     <Product>Farloop</Product>
     <AssemblyTitle>Farloop</AssemblyTitle>
     <Company>Farloop</Company>

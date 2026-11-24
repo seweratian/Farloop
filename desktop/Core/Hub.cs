@@ -788,6 +788,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             d.Busy = "正在打开画面…";
             var active = Config.Stream.Clone();
             var p = Moonlight.StartStream(d.Ip, active);
+            _activeSettings[d.Ip] = active;
             _streams[d.Ip] = p;
             d.IsConnected = true;
             _overlays[d.Ip] = new FreeRemote.Overlay(d, p, active, active.InfoCard);
@@ -886,7 +887,16 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         {
             // 快速重连时旧进程退出，不算结束远程
             if (_restarting.Contains(d.Ip) || !_streams.TryGetValue(d.Ip, out var cur) || cur != p) return;
+            EndStreamUi(d);
+        });
+    }
+
+    /// <summary>画面结束：关浮层、本地光标，标记断开</summary>
+    void EndStreamUi(DeviceVM d)
+    {
+        {
             _streams.TryRemove(d.Ip, out Process? _);
+            _activeSettings.Remove(d.Ip);
             CloseOverlay(d.Ip);
             StopLocalCursor(d.Ip);
             d.IsConnected = false;
@@ -894,7 +904,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             if (!Transfers.Any(t => t.Outgoing && !t.Finished)) OutgoingTo(d.Ip)?.Close();
             UpdateBanner();
             if (Assist.IsAssistIp(d.Ip)) EndAssistHelp("协助已结束");
-        });
+        }
     }
 
     void CloseOverlay(string ip)
@@ -910,6 +920,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     {
         if (!_streams.TryGetValue(d.Ip, out var old) || !_restarting.Add(d.Ip)) return;
         FreeRemote.FreezeFrame? freeze = null;
+        bool failed = false;
         try
         {
             var active = Config.Stream.Clone();
@@ -926,17 +937,51 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
 
             // 2. 底下重连
             try { old.Kill(); await old.WaitForExitAsync(new CancellationTokenSource(5000).Token); } catch { }
-            var p = Moonlight.StartStream(d.Ip, active);
-            _streams[d.Ip] = p;
-            o?.Attach(p, active);
-            WatchExit(d, p);
 
-            // 3. 新画面窗口出现后放回原位置/大小，等首帧后淡出冻结画面
-            var h = await FreeRemote.Overlay.WaitForStreamWindowAsync(p, 15_000);
-            if (h != IntPtr.Zero && snap != null) FreeRemote.Overlay.RestorePlacement(h, snap);
-            _ = StartLocalCursorAsync(d, p, active); // 新 Moonlight 进程要重新打开本地光标
-            await Task.Delay(h != IntPtr.Zero ? 700 : 0);
-            Log.Info($"已按新参数重连：{active.ResolutionLabel} {active.Fps}fps {active.Codec} {active.BitrateMbps}M");
+            // 3. 新画面窗口出现、进程 2 秒后还在才算连上（外部 Moonlight 给不出“首帧”信号，这是能拿到的最可靠的判断）；
+            //    以前等不到窗口也写“已按新参数重连”，失败了没人知道，也不会恢复
+            async Task<bool> LaunchAsync(StreamSettings s)
+            {
+                var p = Moonlight.StartStream(d.Ip, s);
+                _streams[d.Ip] = p;
+                o?.Attach(p, s);
+                WatchExit(d, p);
+                var h = await FreeRemote.Overlay.WaitForStreamWindowAsync(p, 15_000);
+                if (h == IntPtr.Zero || p.HasExited)
+                {
+                    Log.Error($"重连失败：{(p.HasExited ? "Moonlight 退出了（退出码 " + SafeExitCode(p) + "）" : "15 秒内没有出现画面窗口")}");
+                    try { if (!p.HasExited) p.Kill(); } catch { }
+                    return false;
+                }
+                if (snap != null) FreeRemote.Overlay.RestorePlacement(h, snap);
+                for (int i = 0; i < 20; i++)
+                {
+                    await Task.Delay(100);
+                    if (p.HasExited) { Log.Error($"重连失败：Moonlight 打开画面后马上退出了（退出码 {SafeExitCode(p)}）"); return false; }
+                }
+                _ = StartLocalCursorAsync(d, p, s); // 新 Moonlight 进程要重新打开本地光标
+                _activeSettings[d.Ip] = s;
+                return true;
+            }
+
+            _activeSettings.TryGetValue(d.Ip, out var previous);
+            if (await LaunchAsync(active))
+            {
+                Log.Info($"已按新参数重连：{active.ResolutionLabel} {active.Fps}fps {active.Codec} {active.BitrateMbps}M");
+            }
+            else if (previous != null && await LaunchAsync(previous))
+            {
+                // 新参数连不上（比如对方显卡不支持这个分辨率 / 编码）：退回原来的参数，控制中心里的设置也改回去，免得下次又用坏的
+                Config.Stream = previous.Clone();
+                Config.Save();
+                Log.Info($"新参数连不上，已恢复原来的：{previous.ResolutionLabel} {previous.Fps}fps {previous.Codec} {previous.BitrateMbps}M");
+                ShowToast($"新参数没能连上，已恢复为原来的 {previous.ResolutionLabel} · {previous.Fps} FPS");
+            }
+            else
+            {
+                ShowToast("重连失败，请重新点“连接”");
+                failed = true;
+            }
         }
         catch (Exception e)
         {
@@ -947,10 +992,15 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         {
             _restarting.Remove(d.Ip);
             if (freeze != null) await freeze.FadeOutAsync();
+            if (failed) EndStreamUi(d); // 新旧参数都没连上：按结束远程处理，界面不要停在“已连接”
         }
     }
 
     readonly HashSet<string> _restarting = new();
+    /// <summary>每台设备这次串流实际用的参数（应用新参数失败时退回它）</summary>
+    readonly Dictionary<string, StreamSettings> _activeSettings = new();
+
+    static string SafeExitCode(Process p) { try { return p.ExitCode.ToString(); } catch { return "?"; } }
 
     public void SetInfoCard(DeviceVM d, bool on)
     {
