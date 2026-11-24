@@ -12,7 +12,7 @@ index 2c7ee9b..5da6931 100644
    MAIL(hdr);  ///< HDR.
  #undef MAIL
 diff --git a/src/nvenc/nvenc_base.cpp b/src/nvenc/nvenc_base.cpp
-index d20ca83..ec75fd4 100644
+index d20ca83..dd2fcd8 100644
 --- a/src/nvenc/nvenc_base.cpp
 +++ b/src/nvenc/nvenc_base.cpp
 @@ -672,6 +672,15 @@ namespace NVENC_NAMESPACE {
@@ -31,7 +31,7 @@ index d20ca83..ec75fd4 100644
      encoder_state = {};
      fail_guard.disable();
      return true;
-@@ -792,6 +801,69 @@ namespace NVENC_NAMESPACE {
+@@ -792,6 +801,75 @@ namespace NVENC_NAMESPACE {
      return encoded_frame;
    }
  
@@ -44,18 +44,19 @@ index d20ca83..ec75fd4 100644
 +      return true;
 +    }
 +
-+    farloop_enc_config.rcParams.averageBitRate = kbps * 1000;
++    auto enc_config = farloop_enc_config;
++    enc_config.rcParams.averageBitRate = kbps * 1000;
 +    if (farloop_custom_vbv) {
 +      auto vbv = kbps * 1000 / farloop_framerate;
 +      if (farloop_vbv_increase > 0) {
 +        vbv += vbv * farloop_vbv_increase / 100;
 +      }
-+      farloop_enc_config.rcParams.vbvBufferSize = vbv;
++      enc_config.rcParams.vbvBufferSize = vbv;
 +    }
 +
 +    NV_ENC_RECONFIGURE_PARAMS params = {.version = NV_ENC_RECONFIGURE_PARAMS_VER};
 +    params.reInitEncodeParams = farloop_init_params;
-+    params.reInitEncodeParams.encodeConfig = &farloop_enc_config;
++    params.reInitEncodeParams.encodeConfig = &enc_config;
 +    params.resetEncoder = 0;
 +    params.forceIDR = 0;
 +    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &params))) {
@@ -63,6 +64,7 @@ index d20ca83..ec75fd4 100644
 +      return false;
 +    }
 +    BOOST_LOG(info) << "NvEnc: bitrate " << farloop_current_kbps << " -> " << kbps << " kbps (Farloop adaptive)";
++    farloop_enc_config = enc_config;
 +    farloop_current_kbps = kbps;
 +    return true;
 +  }
@@ -75,25 +77,29 @@ index d20ca83..ec75fd4 100644
 +    if (fps == farloop_framerate && farloop_init_params.frameRateDen == 1) {
 +      return true;
 +    }
-+    farloop_init_params.frameRateNum = fps;
-+    farloop_init_params.frameRateDen = 1;
-+    farloop_framerate = fps;
++    auto enc_config = farloop_enc_config;
 +    if (farloop_custom_vbv) {
 +      auto vbv = farloop_current_kbps * 1000 / fps;
 +      if (farloop_vbv_increase > 0) {
 +        vbv += vbv * farloop_vbv_increase / 100;
 +      }
-+      farloop_enc_config.rcParams.vbvBufferSize = vbv;
++      enc_config.rcParams.vbvBufferSize = vbv;
 +    }
 +    NV_ENC_RECONFIGURE_PARAMS params = {.version = NV_ENC_RECONFIGURE_PARAMS_VER};
 +    params.reInitEncodeParams = farloop_init_params;
-+    params.reInitEncodeParams.encodeConfig = &farloop_enc_config;
++    params.reInitEncodeParams.frameRateNum = fps;
++    params.reInitEncodeParams.frameRateDen = 1;
++    params.reInitEncodeParams.encodeConfig = &enc_config;
 +    params.resetEncoder = 0;
 +    params.forceIDR = 0;
 +    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &params))) {
 +      BOOST_LOG(error) << "NvEnc: NvEncReconfigureEncoder() to " << fps << " fps failed: " << last_nvenc_error_string;
 +      return false;
 +    }
++    farloop_enc_config = enc_config;
++    farloop_init_params.frameRateNum = fps;
++    farloop_init_params.frameRateDen = 1;
++    farloop_framerate = fps;
 +    BOOST_LOG(info) << "NvEnc: frame rate -> " << fps << " fps (Farloop)";
 +    return true;
 +  }

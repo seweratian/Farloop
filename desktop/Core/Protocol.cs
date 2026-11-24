@@ -161,17 +161,36 @@ public sealed class PeerSession
     public string RemoteName { get; private set; } = "";
     public string RemoteIp { get; private set; } = "";
     public bool Outgoing { get; }
-    public bool IsOpen => _closed == 0;
+    public bool IsOpen => Volatile.Read(ref _closed) == 0;
+    // The listener or connector that selected the tunnel credentials sets this.
+    public bool IsAssist { get; }
+    int _assistPairStarted, _assistApproved;
+    public bool IsApproved => !IsAssist || Volatile.Read(ref _assistApproved) == 1;
+    public bool IsReady => IsOpen && IsApproved;
+    public CancellationToken ClosedToken => _cts.Token;
+
+    public bool TryBeginAssistPair() => IsAssist && !Outgoing && IsOpen &&
+        Interlocked.CompareExchange(ref _assistPairStarted, 1, 0) == 0;
+    public void ApproveAssist() => Volatile.Write(ref _assistApproved, 1);
+
+    bool AllowsFrame(MsgType type, bool sending)
+    {
+        if (!IsAssist) return true;
+        if (type == MsgType.PairRequest) return Outgoing == sending;
+        if (type == MsgType.PairResult) return Outgoing != sending;
+        return IsApproved;
+    }
 
     public event Action<PeerSession, MsgType, byte[]>? Message;
     public event Action<PeerSession>? Closed;
 
-    PeerSession(TcpClient c, bool outgoing)
+    PeerSession(TcpClient c, bool outgoing, bool isAssist)
     {
         _client = c;
         _client.NoDelay = true;
         _stream = c.GetStream();
         Outgoing = outgoing;
+        IsAssist = isAssist;
         // 默认的 TcpClient 是双栈套接字，对方地址会是 “::ffff:10.x.x.x”，和设备列表里的 IP 对不上，
         // 会导致：重复建连接、本地光标形状收不到、拖出文件配不上。统一转成纯 IPv4。
         var addr = ((IPEndPoint)c.Client.RemoteEndPoint!).Address;
@@ -179,7 +198,7 @@ public sealed class PeerSession
         RemoteIp = addr.ToString();
     }
 
-    public static async Task<PeerSession> ConnectAsync(string ip, string myName, string myIp, string secret, CancellationToken ct, string? purpose = null)
+    public static async Task<PeerSession> ConnectAsync(string ip, string myName, string myIp, string secret, CancellationToken ct, string? purpose = null, bool isAssist = false)
     {
         var c = new TcpClient(AddressFamily.InterNetwork);
         using var t = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -187,18 +206,18 @@ public sealed class PeerSession
         try
         {
             await c.ConnectAsync(IPAddress.Parse(ip), Port, t.Token);
-            var s = new PeerSession(c, true) { _myPurpose = purpose };
+            var s = new PeerSession(c, true, isAssist) { _myPurpose = purpose };
             await s.HandshakeAsync(myName, myIp, secret, t.Token);
             return s;
         }
         catch { c.Dispose(); throw; }
     }
 
-    public static async Task<PeerSession> AcceptAsync(TcpClient c, string myName, string myIp, string secret, CancellationToken ct)
+    public static async Task<PeerSession> AcceptAsync(TcpClient c, string myName, string myIp, string secret, CancellationToken ct, bool isAssist)
     {
         using var t = CancellationTokenSource.CreateLinkedTokenSource(ct);
         t.CancelAfter(8000);
-        var s = new PeerSession(c, false);
+        var s = new PeerSession(c, false, isAssist);
         await s.HandshakeAsync(myName, myIp, secret, t.Token);
         return s;
     }
@@ -241,6 +260,7 @@ public sealed class PeerSession
             while (!_cts.IsCancellationRequested)
             {
                 var (t, b) = await Frames.ReadAsync(_stream, _cts.Token);
+                if (!AllowsFrame(t, sending: false)) continue;
                 try { Message?.Invoke(this, t, b); }
                 catch (Exception e) { Log.Error($"处理消息 {t} 出错", e); }
             }
@@ -252,6 +272,7 @@ public sealed class PeerSession
 
     public async Task SendAsync(MsgType t, ReadOnlyMemory<byte> payload)
     {
+        if (!AllowsFrame(t, sending: true)) throw new InvalidOperationException("远程协助会话尚未授权此操作");
         await _writeLock.WaitAsync(_cts.Token);
         try { await Frames.WriteAsync(_stream, t, payload, _cts.Token); }
         catch { Close(); throw; }

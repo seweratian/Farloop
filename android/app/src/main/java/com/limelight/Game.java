@@ -179,6 +179,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private PreferenceConfiguration prefConfig;
     private SharedPreferences tombstonePrefs;
 
+    private boolean shouldInvertDecoderResolution;
     private int displayWidth;
     private int displayHeight;
     private int currentOrientation;
@@ -396,8 +397,6 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
 
         onExternelDisplay = currentDisplay.getDisplayId() != Display.DEFAULT_DISPLAY;
-
-        boolean shouldInvertDecoderResolution = false;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 && onExternelDisplay
@@ -782,20 +781,17 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
         // Farloop：被控端支持码率自适应时，分辨率跟随电脑屏幕、编码器按最高码率建，画质档位只是码率上限（串流中切档不重连）
         int frBitrate = isMetered ? prefConfig.meteredBitrate : prefConfig.bitrate;
-        boolean frAdaptive = com.freeremote.FrStreamHooks.adaptiveFor(this, host);
-        int[] frRes = frAdaptive ? com.freeremote.FrStreamHooks.adaptiveResolution(this, host) : null;
-        frAdaptiveOn = frAdaptive;
-        if (frRes != null) {
-            boolean portrait = displayHeight > displayWidth; // 竖屏时解码分辨率是倒过来的
-            displayWidth = portrait ? frRes[1] : frRes[0];
-            displayHeight = portrait ? frRes[0] : frRes[1];
+        frAdaptiveOn = com.freeremote.FrStreamHooks.adaptiveFor(this, host);
+        android.util.Size frSize = farloopStreamSize(prefConfig);
+        displayWidth = frSize.getWidth();
+        displayHeight = frSize.getHeight();
+        if (frAdaptiveOn) {
             com.limelight.nvstream.jni.MoonBridge.farloopSetCap(frBitrate);
             frBitrate = Math.max(frBitrate, com.freeremote.FrStreamHooks.ADAPTIVE_CEILING_KBPS);
-            LimeLog.info("Farloop: 分辨率跟随电脑屏幕 " + displayWidth + "x" + displayHeight + "，码率上限 " + prefConfig.bitrate);
         } else {
             com.limelight.nvstream.jni.MoonBridge.farloopSetCap(0);
         }
-        com.freeremote.FrStreamHooks.noteStream(displayWidth, displayHeight, Math.round(prefConfig.fps));
+        com.freeremote.FrStreamHooks.streamFps = Math.round(prefConfig.fps);
 
         StreamConfiguration config = new StreamConfiguration.Builder()
                 .setResolution(
@@ -1030,6 +1026,21 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             // No need for alpha changes since the color indicates the state
             overlayToggleButton.setAlpha(1.0f);
         }
+    }
+
+    private android.util.Size farloopStreamSize(PreferenceConfiguration settings) {
+        // External displays render at their physical mode, captured in prefConfig at launch.
+        if (onExternelDisplay && settings.renderMode == 0) settings = prefConfig;
+        int w = shouldInvertDecoderResolution ? settings.height : settings.width;
+        int h = shouldInvertDecoderResolution ? settings.width : settings.height;
+        int[] hostSize = frAdaptiveOn ? com.freeremote.FrStreamHooks.adaptiveResolution(this, host) : null;
+        if (hostSize == null) return new android.util.Size(w, h);
+        return h > w ? new android.util.Size(hostSize[1], hostSize[0]) : new android.util.Size(hostSize[0], hostSize[1]);
+    }
+
+    public boolean matchesSelectedStreamSize() {
+        android.util.Size wanted = farloopStreamSize(PreferenceConfiguration.readPreferences(this));
+        return displayWidth == wanted.getWidth() && displayHeight == wanted.getHeight();
     }
 
     private void listenForExternalDisplayRemoval() {

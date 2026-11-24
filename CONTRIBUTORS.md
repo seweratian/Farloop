@@ -4,6 +4,7 @@
 |---|---|
 | [seweratian](https://github.com/seweratian) | 发起人、产品设计、真机测试 |
 | Claude（Anthropic） | 设计与编码：Windows 端、安卓端改造、EasyTier 打洞补丁、Sunshine 码率补丁、码率自适应控制器 |
+| OpenAI Codex | 代码审查与修复：远程协助授权、文件传输完整性、串流设置与重连 |
 
 ## 致谢
 

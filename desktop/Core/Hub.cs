@@ -273,7 +273,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     public void SayGoodbye()
     {
         List<PeerSession> all;
-        lock (_gate) all = _sessions.ToList();
+        lock (_gate) all = _sessions.Where(s => s.IsReady).ToList();
         try { Task.WaitAll(all.Select(s => s.SendAsync(MsgType.Goodbye, Array.Empty<byte>())).ToArray(), 1500); } catch { }
     }
 
@@ -291,9 +291,9 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     public void ShowToast(string text, string? path = null) => Ui(() => Toast?.Invoke(text, path));
 
     // ---------- 监听：只绑定虚拟网卡 IP，外网根本连不到 ----------
-    Task ListenLoop(CancellationToken ct) => ListenLoop(() => Config.VirtualIp, () => Config.NetworkSecret, ct);
+    Task ListenLoop(CancellationToken ct) => ListenLoop(() => Config.VirtualIp, () => Config.NetworkSecret, ct, isAssist: false);
 
-    async Task ListenLoop(Func<string> myIp, Func<string> secret, CancellationToken ct)
+    async Task ListenLoop(Func<string> myIp, Func<string> secret, CancellationToken ct, bool isAssist)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -311,9 +311,10 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
                     {
                         try
                         {
-                            var s = await PeerSession.AcceptAsync(c, Config.DeviceName, myIp(), secret(), ct);
+                            var s = await PeerSession.AcceptAsync(c, Config.DeviceName, myIp(), secret(), ct, isAssist);
+                            if (s.IsAssist && s.IsServiceConnection) { s.Close(); return; }
                             if (s.IsServiceConnection) HandleServiceSession(s); // 问设备信息 / 代发开机信号，不算有人在控制
-                            else AddSession(s);
+                            else AddSession(s, ct);
                         }
                         catch (Exception e) { Log.Error("接入连接失败", e); c.Dispose(); }
                     });
@@ -401,13 +402,22 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     }
 
     // ---------- 会话 ----------
-    void AddSession(PeerSession s)
+    void AddSession(PeerSession s, CancellationToken ct)
     {
         s.Message += OnMessage;
         s.Closed += OnClosed;
-        lock (_gate) _sessions.Add(s);
-        _gone.TryRemove(s.RemoteIp, out _);
+        lock (_gate)
+        {
+            ct.ThrowIfCancellationRequested();
+            _sessions.Add(s);
+        }
         s.Start();
+        if (!s.IsAssist) SessionReady(s);
+    }
+
+    void SessionReady(PeerSession s)
+    {
+        _gone.TryRemove(s.RemoteIp, out _);
         Log.Info($"会话建立：{s.RemoteName} {s.RemoteIp} ({(s.Outgoing ? "出" : "入")}) 对方版本 {s.RemoteVersion}");
         // 两端版本不一致时提示（比如被控端没升级，新功能会悄悄失效 —— 0.5.0 的“拖影”就是这么来的）
         // 手机 App 的版本号和电脑端各自独立，不能拿来比
@@ -459,8 +469,8 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         UpdateBanner();
         UpdateEdgeCatcher();
         // 被控端：最后一个控制者走了 → 关掉 Sunshine 会话，让它把 HDR 等显示设置还原
-        if (!s.Outgoing && Config.AllowControl && !IsBeingControlled) _ = Sunshine.CloseAppAsync(Config);
-        if (!s.Outgoing && Assist.IsAssistIp(s.RemoteIp)) _ = AfterAssistSessionAsync();
+        if (!s.Outgoing && s.IsApproved && Config.AllowControl && !IsBeingControlled) _ = Sunshine.CloseAppAsync(Config);
+        if (!s.Outgoing && s.IsAssist && s.IsApproved) _ = AfterAssistSessionAsync();
     }
 
     PeerSession? OutgoingTo(string ip)
@@ -476,9 +486,9 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             var s = OutgoingTo(ip);
             if (s != null) return s;
             s = Assist.IsAssistIp(ip)
-                ? await PeerSession.ConnectAsync(ip, Config.DeviceName, Assist.HelperIp, _helpSecret, _cts.Token)
+                ? await PeerSession.ConnectAsync(ip, Config.DeviceName, Assist.HelperIp, _helpSecret, _cts.Token, isAssist: true)
                 : await PeerSession.ConnectAsync(ip, Config.DeviceName, Config.VirtualIp, Config.NetworkSecret, _cts.Token);
-            AddSession(s);
+            AddSession(s, _cts.Token);
             return s;
         }
         finally { _connectLock.Release(); }
@@ -487,11 +497,11 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     void UpdateBanner()
     {
         List<PeerSession> list;
-        lock (_gate) list = _sessions.ToList();
+        lock (_gate) list = _sessions.Where(s => s.IsReady).ToList();
         Ui(() =>
         {
-            var incoming = list.Where(s => !s.Outgoing && !Assist.IsAssistIp(s.RemoteIp)).Select(s => s.RemoteName).Distinct().ToList();
-            var helpers = list.Where(s => !s.Outgoing && Assist.IsAssistIp(s.RemoteIp)).Select(s => s.RemoteName).Distinct().ToList();
+            var incoming = list.Where(s => !s.Outgoing && !s.IsAssist).Select(s => s.RemoteName).Distinct().ToList();
+            var helpers = list.Where(s => !s.Outgoing && s.IsAssist).Select(s => s.RemoteName).Distinct().ToList();
             var outgoing = Devices.Where(d => d.IsConnected).Select(d => d.Name).ToList();
             if (AssistDevice is { IsConnected: true } ad) outgoing.Add(ad.Name + "（协助）");
             var parts = new List<string>();
@@ -520,7 +530,16 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
                 _ = HandlePairRequestAsync(s, Frames.FromJson<PairRequestMsg>(b));
                 break;
             case MsgType.PairResult:
-                if (_pendingPairs.TryRemove(s, out var tcs)) tcs.TrySetResult(Frames.FromJson<PairResultMsg>(b));
+                if (_pendingPairs.TryRemove(s, out var tcs))
+                {
+                    var result = Frames.FromJson<PairResultMsg>(b);
+                    if (s.IsAssist && result.Ok)
+                    {
+                        s.ApproveAssist();
+                        SessionReady(s);
+                    }
+                    tcs.TrySetResult(result);
+                }
                 break;
             case MsgType.Privacy when b.Length == 1:
                 Ui(() =>
@@ -621,7 +640,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
                 break;
             }
             case MsgType.TermClose:
-                RemoteTools.Close(Frames.FromJson<TermCloseMsg>(b).Id);
+                if (Trusted(s)) RemoteTools.Close(Frames.FromJson<TermCloseMsg>(b).Id);
                 break;
             case MsgType.AppListReq:
                 _ = Task.Run(async () =>
@@ -732,11 +751,15 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     async Task HandlePairRequestAsync(PeerSession s, PairRequestMsg m)
     {
         PairResultMsg res;
-        if (Assist.IsAssistIp(s.RemoteIp))
+        if (s.IsAssist)
         {
-            res = await HandleAssistPairAsync(s, m);
+            if (!s.TryBeginAssistPair()) return;
+            try { res = await HandleAssistPairAsync(s, m); }
+            catch (Exception e) { Log.Error("协助配对失败", e); res = new(false, "协助配对失败"); }
             Log.Info($"远程协助请求来自 {m.ClientName}: {res.Ok} {res.Message}");
             try { await s.SendJsonAsync(MsgType.PairResult, res); } catch { }
+            if (!res.Ok) s.Close();
+            else if (s.IsReady) SessionReady(s);
             return;
         }
         if (!Config.AllowControl) res = new(false, "对方设置了不允许被远程控制");
@@ -760,8 +783,8 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             d.Busy = "正在连接…";
             var s = await GetSessionAsync(d.Ip);
 
-            bool assist = Assist.IsAssistIp(d.Ip);
-            if (assist || !Config.PairedHosts.Contains(d.Ip))
+            bool assist = s.IsAssist;
+            if (assist ? !s.IsApproved : !Config.PairedHosts.Contains(d.Ip))
             {
                 d.Busy = assist ? "等待对方点“允许”…" : "首次连接，正在自动配对…";
                 var pin = RandomNumberGenerator.GetInt32(0, 10000).ToString("D4");
@@ -775,6 +798,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
                 catch (TimeoutException) { res = new(false, "等待超时"); }
                 if (!res.Ok)
                 {
+                    if (assist) s.Close();
                     try { if (!pairProc.HasExited) pairProc.Kill(); } catch { }
                     ShowToast(assist ? $"没有连上：{res.Message}" : $"自动配对失败：{res.Message}。可在被控端打开 https://localhost:47990/pin 手动输入 PIN {pin}");
                     return;
@@ -942,26 +966,32 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             //    以前等不到窗口也写“已按新参数重连”，失败了没人知道，也不会恢复
             async Task<bool> LaunchAsync(StreamSettings s)
             {
-                var p = Moonlight.StartStream(d.Ip, s);
-                _streams[d.Ip] = p;
-                o?.Attach(p, s);
-                WatchExit(d, p);
-                var h = await FreeRemote.Overlay.WaitForStreamWindowAsync(p, 15_000);
-                if (h == IntPtr.Zero || p.HasExited)
+                Process? p = null;
+                try
                 {
-                    Log.Error($"重连失败：{(p.HasExited ? "Moonlight 退出了（退出码 " + SafeExitCode(p) + "）" : "15 秒内没有出现画面窗口")}");
-                    try { if (!p.HasExited) p.Kill(); } catch { }
+                    p = Moonlight.StartStream(d.Ip, s);
+                    _streams[d.Ip] = p;
+                    o?.Attach(p, s);
+                    WatchExit(d, p);
+                    var h = await FreeRemote.Overlay.WaitForStreamWindowAsync(p, 15_000);
+                    if (p.HasExited) throw new InvalidOperationException($"Moonlight 退出了（退出码 {SafeExitCode(p)}）");
+                    if (h == IntPtr.Zero) throw new TimeoutException("15 秒内没有出现画面窗口");
+                    if (snap != null) FreeRemote.Overlay.RestorePlacement(h, snap);
+                    for (int i = 0; i < 20; i++)
+                    {
+                        await Task.Delay(100);
+                        if (p.HasExited) throw new InvalidOperationException($"Moonlight 打开画面后马上退出了（退出码 {SafeExitCode(p)}）");
+                    }
+                    _ = StartLocalCursorAsync(d, p, s); // 新 Moonlight 进程要重新打开本地光标
+                    _activeSettings[d.Ip] = s;
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    Log.Error("重连失败", e);
+                    try { if (p != null && !p.HasExited) p.Kill(); } catch { }
                     return false;
                 }
-                if (snap != null) FreeRemote.Overlay.RestorePlacement(h, snap);
-                for (int i = 0; i < 20; i++)
-                {
-                    await Task.Delay(100);
-                    if (p.HasExited) { Log.Error($"重连失败：Moonlight 打开画面后马上退出了（退出码 {SafeExitCode(p)}）"); return false; }
-                }
-                _ = StartLocalCursorAsync(d, p, s); // 新 Moonlight 进程要重新打开本地光标
-                _activeSettings[d.Ip] = s;
-                return true;
             }
 
             _activeSettings.TryGetValue(d.Ip, out var previous);
@@ -991,8 +1021,8 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         finally
         {
             _restarting.Remove(d.Ip);
-            if (freeze != null) await freeze.FadeOutAsync();
             if (failed) EndStreamUi(d); // 新旧参数都没连上：按结束远程处理，界面不要停在“已连接”
+            if (freeze != null) await freeze.FadeOutAsync();
         }
     }
 
@@ -1099,9 +1129,9 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
 
     // ================= 远程协助（设备码 + 临时密码，见 Core/Assist.cs） =================
     /// <summary>被协助端：这个会话能不能看 / 操作屏幕（自己人看“允许被远程”，协助者看“允许别人协助我”）</summary>
-    bool Controllable(PeerSession s) => Assist.IsAssistIp(s.RemoteIp) ? AssistHostActive : Config.AllowControl;
+    bool Controllable(PeerSession s) => s.IsAssist ? s.IsReady && !s.Outgoing && AssistHostActive : Config.AllowControl;
     /// <summary>只给自己人：终端、文件管理、启动程序、改打洞线路</summary>
-    bool Trusted(PeerSession s) => Config.AllowControl && !Assist.IsAssistIp(s.RemoteIp);
+    bool Trusted(PeerSession s) => Config.AllowControl && !s.IsAssist;
 
     CancellationTokenSource? _assistListen;
     int _assistRetries;
@@ -1146,7 +1176,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             {
                 _assistListen = new CancellationTokenSource();
                 var ct = _assistListen.Token;
-                _ = Task.Run(() => ListenLoop(() => Assist.HostIp, () => Assist.Secret(Config.AssistId, Config.AssistPassword), ct));
+                _ = Task.Run(() => ListenLoop(() => Assist.HostIp, () => Assist.Secret(Config.AssistId, Config.AssistPassword), ct, isAssist: true));
                 _ = Task.Run(async () => { try { await Installer.ConfigureAssistFirewallAsync(); } catch (Exception e) { Log.Error("协助防火墙规则失败", e); } });
             }
             AssistStatus = "等待对方连接。把设备码和密码告诉对方，对方在 Farloop 的“远程协助”里输入即可";
@@ -1175,7 +1205,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     void CloseAssistSessions()
     {
         List<PeerSession> l;
-        lock (_gate) l = _sessions.Where(x => !x.Outgoing && Assist.IsAssistIp(x.RemoteIp)).ToList();
+        lock (_gate) l = _sessions.Where(x => !x.Outgoing && x.IsAssist).ToList();
         foreach (var x in l) x.Close();
     }
 
@@ -1192,7 +1222,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         Config.AssistPassword = Assist.NewPassword();
         Config.Save();
         Raise(nameof(AssistPassword));
-        CloseAssistSessions();
+        StopAssistHost();
         if (Config.AssistEnabled) StartAssistHost();
     }
 
@@ -1212,12 +1242,26 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     {
         if (!AssistHostActive) return new(false, "对方关闭了远程协助");
         if (!await ConfirmAssistAsync(m.ClientName)) return new(false, "对方拒绝了协助请求（或没有在 40 秒内点“允许”）");
+        if (!s.IsOpen || !AssistHostActive) return new(false, "协助已结束");
         await Sunshine.EnsureRunningAsync();
+        s.ClosedToken.ThrowIfCancellationRequested();
         var name = $"Farloop协助-{m.ClientName}-{RandomNumberGenerator.GetInt32(0, 0x10000):x4}";
-        var (ok, msg) = await Sunshine.SubmitPinAsync(Config, m.Pin, name, s.RemoteIp, _cts.Token);
+        var (ok, msg) = await Sunshine.SubmitPinAsync(Config, m.Pin, name, s.RemoteIp, s.ClosedToken);
         if (ok)
         {
-            lock (_assistClients) _assistClients.Add(name);
+            lock (_gate)
+            {
+                if (s.IsOpen && AssistHostActive)
+                {
+                    lock (_assistClients) _assistClients.Add(name);
+                    s.ApproveAssist();
+                }
+            }
+            if (!s.IsReady)
+            {
+                await Sunshine.UnpairByNameAsync(Config, name);
+                return new(false, "协助已结束");
+            }
             AssistBeingHelped = true;
             AssistStatus = $"{m.ClientName} 正在远程协助本机";
         }
@@ -1236,7 +1280,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     {
         await Task.Delay(delayMs); // 对方只是短暂重连的话不算结束
         bool still;
-        lock (_gate) still = _sessions.Any(x => !x.Outgoing && Assist.IsAssistIp(x.RemoteIp) && x.IsOpen);
+        lock (_gate) still = _sessions.Any(x => !x.Outgoing && x.IsAssist && x.IsReady);
         if (still) return;
         List<string> names;
         lock (_assistClients) { names = _assistClients.ToList(); _assistClients.Clear(); }
@@ -1347,7 +1391,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     public void BroadcastSelfInfo()
     {
         List<PeerSession> l;
-        lock (_gate) l = _sessions.Where(x => !x.Outgoing && x.IsOpen).ToList();
+        lock (_gate) l = _sessions.Where(x => !x.Outgoing && x.IsReady).ToList();
         if (l.Count == 0) return;
         var info = SelfInfo();
         foreach (var x in l) _ = x.SendJsonAsync(MsgType.DeviceInfo, info);
@@ -1451,7 +1495,7 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
                     StoreDevice(Frames.FromJson<DeviceInfoMsg>(b), s.RemoteIp);
                     await s.SendJsonAsync(MsgType.DeviceInfo, SelfInfo());
                 }
-                else if (t == MsgType.WakeRequest && !Assist.IsAssistIp(s.RemoteIp))
+                else if (t == MsgType.WakeRequest && !s.IsAssist)
                 {
                     var m = Frames.FromJson<WakeRequestMsg>(b);
                     Log.Info($"{s.RemoteName} 请本机代发开机信号给 {m.TargetName}");
@@ -1779,12 +1823,12 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         });
     }
 
-    bool IsBeingControlled { get { lock (_gate) return _sessions.Any(x => !x.Outgoing && x.IsOpen); } }
+    bool IsBeingControlled { get { lock (_gate) return _sessions.Any(x => !x.Outgoing && x.IsReady); } }
 
     void OnFilesAtEdge(string[] paths)
     {
         PeerSession? s = _cursorHost.Target;
-        if (s == null || !s.IsOpen) lock (_gate) s = _sessions.LastOrDefault(x => !x.Outgoing && x.IsOpen);
+        if (s == null || !s.IsOpen) lock (_gate) s = _sessions.LastOrDefault(x => !x.Outgoing && x.IsReady);
         if (s == null) return;
         var token = Guid.NewGuid().ToString("N");
         _dragOut[token] = paths;
@@ -1940,11 +1984,11 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
     // ---------- ClipboardSync.IHost ----------
     bool ClipboardSync.IHost.ClipboardEnabled => Config.ClipboardSync;
     bool ClipboardSync.IHost.FileClipboardEnabled => Config.FileClipboardSync;
-    bool ClipboardSync.IHost.HasSessions { get { lock (_gate) return _sessions.Count > 0; } }
+    bool ClipboardSync.IHost.HasSessions { get { lock (_gate) return _sessions.Any(s => s.IsReady); } }
 
     List<PeerSession> DistinctSessions()
     {
-        lock (_gate) return _sessions.Where(s => s.IsOpen).GroupBy(s => s.RemoteIp).Select(g => g.First()).ToList();
+        lock (_gate) return _sessions.Where(s => s.IsReady).GroupBy(s => s.RemoteIp).Select(g => g.First()).ToList();
     }
 
     void ClipboardSync.IHost.BroadcastClipboard(byte[] payload)

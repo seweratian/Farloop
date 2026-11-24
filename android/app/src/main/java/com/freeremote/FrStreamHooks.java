@@ -83,10 +83,7 @@ public final class FrStreamHooks {
         return CUSTOM_RES_NAMES[Math.max(0, Math.min(4, customRes(c)))] + " · " + customFps(c) + "fps · " + customKbps(c) / 1000 + "M";
     }
 
-    /** 现在这次串流用的分辨率和帧率（自定义档改了这些才需要重连，只改码率可以无缝生效） */
-    public static volatile int streamW, streamH, streamFps;
-
-    public static void noteStream(int w, int h, int fps) { streamW = w; streamH = h; streamFps = fps; }
+    public static volatile int streamFps;
 
     /** 被控端的 Sunshine 支持串流中途改帧率（电脑端 Farloop 0.21 起报告 LiveFramerate） */
     public static boolean liveFramerate(android.content.Context c, String host) {

@@ -955,8 +955,7 @@ public final class FrStreamOverlay {
             FrStreamHooks.setCustom(game, res[0], fps[0], kbps[0]);
             closeSheet();
             // 这次串流的分辨率、帧率都没变，又开着码率自适应：只改码率上限，画面不断
-            int[] want = res[0] == 0 ? FrStreamHooks.adaptiveResolution(game, host) : null;
-            boolean sameRes = res[0] == 0 && (want == null || Math.max(want[0], want[1]) == Math.max(FrStreamHooks.streamW, FrStreamHooks.streamH));
+            boolean sameRes = game.matchesSelectedStreamSize();
             boolean live = com.limelight.nvstream.jni.MoonBridge.farloopGetBitrateKbps() > 0;
             boolean fpsSame = fps[0] == FrStreamHooks.streamFps;
             boolean fpsLive = fpsSame || FrStreamHooks.liveFramerate(game, host);

@@ -30,22 +30,26 @@ public sealed class TransferManager
         public required string PartPath;
         public required string FinalPath;
         public required RecvBatch Batch;
+        public required long Size;
     }
 
     sealed class RecvBatch
     {
+        public required Guid Id;
         public required PeerSession From;
         public required string BaseDir;
         public required bool ForClipboard;
         public required TransferVM VM;
         public required int Total;
         public int Done;
+        public int Started;
+        public long CommittedBytes;
         public readonly Dictionary<string, string> RootMap = new(StringComparer.OrdinalIgnoreCase);
     }
 
     readonly IHost _host;
-    readonly ConcurrentDictionary<Guid, RecvFile> _files = new();
-    readonly ConcurrentDictionary<Guid, RecvBatch> _batches = new();
+    readonly ConcurrentDictionary<(PeerSession From, Guid Id), RecvFile> _files = new();
+    readonly ConcurrentDictionary<(PeerSession From, Guid Id), RecvBatch> _batches = new();
 
     public TransferManager(IHost host) { _host = host; }
 
@@ -77,7 +81,8 @@ public sealed class TransferManager
     {
         var files = Expand(paths);
         if (files.Count == 0) return;
-        long total = files.Sum(f => new FileInfo(f.Full).Length);
+        var sizes = files.Select(f => new FileInfo(f.Full).Length).ToArray();
+        long total = sizes.Sum();
         var roots = files.Select(f => f.Root).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var title = roots.Count == 1 ? roots[0] : $"{roots[0]} 等 {roots.Count} 项";
         var vm = new TransferVM(title, (forClipboard ? "剪贴板 → " : "发送到 ") + s.RemoteName, total, true, s.RemoteIp, forClipboard);
@@ -92,14 +97,20 @@ public sealed class TransferManager
                 var (full, root, rel) = files[i];
                 var id = Guid.NewGuid();
                 await using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, ChunkSize, true);
-                await s.SendJsonAsync(MsgType.FileBegin, new FileBeginMsg(id, batch, root, rel, fs.Length, i, files.Count, total, forClipboard, dropX, dropY, token));
+                long size = sizes[i];
+                if (fs.Length != size) throw new IOException($"文件大小已改变：{rel}");
+                await s.SendJsonAsync(MsgType.FileBegin, new FileBeginMsg(id, batch, root, rel, size, i, files.Count, total, forClipboard, dropX, dropY, token));
                 id.TryWriteBytes(buf.AsSpan(0, 16));
+                long sent = 0;
                 int n;
                 while ((n = await fs.ReadAsync(buf.AsMemory(16, ChunkSize))) > 0)
                 {
+                    if (n > size - sent) throw new IOException($"文件大小已改变：{rel}");
                     await s.SendAsync(MsgType.FileChunk, buf.AsMemory(0, 16 + n));
+                    sent += n;
                     vm.Add(n);
                 }
+                if (sent != size || fs.Length != size) throw new IOException($"文件大小已改变：{rel}");
                 await s.SendJsonAsync(MsgType.FileEnd, new FileEndMsg(id));
             }
             vm.Complete();
@@ -117,19 +128,33 @@ public sealed class TransferManager
     {
         switch (type)
         {
-            case MsgType.FileBegin: OnBegin(from, Frames.FromJson<FileBeginMsg>(payload)); break;
-            case MsgType.FileChunk: OnChunk(payload); break;
-            case MsgType.FileEnd: OnEnd(Frames.FromJson<FileEndMsg>(payload).Id); break;
+            case MsgType.FileBegin:
+                var m = Frames.FromJson<FileBeginMsg>(payload);
+                try { OnBegin(from, m); }
+                catch (Exception e) { AbortBatch(from, m.Batch, e.Message); throw; }
+                break;
+            case MsgType.FileChunk:
+            case MsgType.FileEnd:
+                var id = type == MsgType.FileEnd ? Frames.FromJson<FileEndMsg>(payload).Id : new Guid(payload.AsSpan(0, 16));
+                if (!_files.TryGetValue((from, id), out var file)) break;
+                try
+                {
+                    if (type == MsgType.FileEnd) OnEnd(id, file);
+                    else OnChunk(payload, file);
+                }
+                catch (Exception e) { AbortBatch(from, file.Batch.Id, e.Message); throw; }
+                break;
             case MsgType.FileAbort:
                 var a = Frames.FromJson<FileAbortMsg>(payload);
-                AbortBatch(a.Batch, "对方取消：" + a.Reason);
+                AbortBatch(from, a.Batch, "对方取消：" + a.Reason);
                 break;
         }
     }
 
     void OnBegin(PeerSession from, FileBeginMsg m)
     {
-        var batch = _batches.GetOrAdd(m.Batch, _ =>
+        if (m.Index != 0 && !_batches.ContainsKey((from, m.Batch))) return;
+        var batch = _batches.GetOrAdd((from, m.Batch), _ =>
         {
             var baseDir = m.ForClipboard
                 ? Path.Combine(Path.GetTempPath(), "FarloopClip", m.Batch.ToString("N")[..8])
@@ -137,9 +162,12 @@ public sealed class TransferManager
             Directory.CreateDirectory(baseDir);
             var vm = new TransferVM(m.Root, (m.ForClipboard ? "剪贴板 ← " : "来自 ") + from.RemoteName, m.BatchBytes, false, from.RemoteIp, m.ForClipboard) { OpenPath = baseDir };
             _host.AddTransfer(vm);
-            return new RecvBatch { From = from, BaseDir = baseDir, ForClipboard = m.ForClipboard, VM = vm, Total = m.Total };
+            return new RecvBatch { Id = m.Batch, From = from, BaseDir = baseDir, ForClipboard = m.ForClipboard, VM = vm, Total = m.Total };
         });
-        if (batch.From != from) throw new InvalidDataException("批次来源不一致");
+        if (m.Size < 0 || m.BatchBytes < 0 || m.Total <= 0 || m.Total != batch.Total ||
+            m.Index != batch.Started || m.Index >= batch.Total ||
+            m.BatchBytes != batch.VM.Total || m.Size > m.BatchBytes)
+            throw new InvalidDataException("文件传输信息不一致");
 
         var segs = SafeSegments(m.RelPath);
         if (segs.Length == 0 || !segs[0].Equals(SafeSegments(m.Root).FirstOrDefault(), StringComparison.OrdinalIgnoreCase))
@@ -160,38 +188,53 @@ public sealed class TransferManager
         if (!final.StartsWith(baseFull, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("非法路径");
 
         Directory.CreateDirectory(Path.GetDirectoryName(final)!);
-        var part = final + ".frpart";
-        var fs = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
-        fs.SetLength(0);
-        _files[m.Id] = new RecvFile { Stream = fs, PartPath = part, FinalPath = final, Batch = batch };
+        var part = Path.Combine(Path.GetDirectoryName(final)!, Guid.NewGuid().ToString("N") + ".frpart");
+        lock (batch)
+        {
+            if (!from.IsOpen) throw new IOException("连接已断开");
+            if (_files.ContainsKey((from, m.Id))) throw new InvalidDataException("文件编号重复");
+            var fs = new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20);
+            _files[(from, m.Id)] = new RecvFile { Stream = fs, PartPath = part, FinalPath = final, Batch = batch, Size = m.Size };
+            batch.Started++;
+        }
     }
 
-    void OnChunk(byte[] payload)
+    static void OnChunk(byte[] payload, RecvFile f)
     {
-        if (payload.Length < 16) return;
-        var id = new Guid(payload.AsSpan(0, 16));
-        if (!_files.TryGetValue(id, out var f)) return;
-        f.Stream.Write(payload, 16, payload.Length - 16);
-        f.Batch.VM.Add(payload.Length - 16);
+        int count = payload.Length - 16;
+        lock (f.Batch)
+        {
+            if (count > f.Size - f.Stream.Position) throw new InvalidDataException("文件超过声明大小");
+            f.Stream.Write(payload, 16, count);
+            f.Batch.VM.Add(count);
+        }
     }
 
-    void OnEnd(Guid id)
+    void OnEnd(Guid id, RecvFile f)
     {
-        if (!_files.TryRemove(id, out var f)) return;
-        f.Stream.Dispose();
-        File.Move(f.PartPath, f.FinalPath, true);
         var b = f.Batch;
-        if (++b.Done < b.Total) return;
+        lock (b)
+        {
+            if (f.Stream.Position != f.Size) throw new InvalidDataException("接收的文件大小与声明不符");
+            long remaining = b.VM.Total - b.CommittedBytes;
+            if (f.Size > remaining || (b.Done + 1 == b.Total && f.Size != remaining))
+                throw new InvalidDataException("接收的批次大小与声明不符");
+            f.Stream.Dispose();
+            File.Move(f.PartPath, f.FinalPath);
+            _files.TryRemove((b.From, id), out _);
+            b.CommittedBytes += f.Size;
+            if (++b.Done < b.Total) return;
+            if (!_batches.TryRemove((b.From, b.Id), out _)) return;
+        }
 
         b.VM.Complete();
-        foreach (var kv in _batches.Where(kv => kv.Value == b).ToList()) _batches.TryRemove(kv.Key, out _);
         var roots = b.RootMap.Values.Select(r => Path.Combine(b.BaseDir, r)).ToList();
         _host.OnBatchReceived(b.From, roots, b.BaseDir, b.ForClipboard);
     }
 
-    void AbortBatch(Guid batchId, string reason)
+    void AbortBatch(PeerSession from, Guid batchId, string reason)
     {
-        if (!_batches.TryRemove(batchId, out var b)) return;
+        if (!_batches.TryRemove((from, batchId), out var b)) return;
         CleanupBatch(b, reason);
     }
 
@@ -204,10 +247,14 @@ public sealed class TransferManager
 
     void CleanupBatch(RecvBatch b, string reason)
     {
-        foreach (var kv in _files.Where(kv => kv.Value.Batch == b).ToList())
+        lock (b)
         {
-            if (!_files.TryRemove(kv.Key, out var f)) continue;
-            try { f.Stream.Dispose(); File.Delete(f.PartPath); } catch { }
+            foreach (var kv in _files.Where(kv => kv.Value.Batch == b).ToList())
+            {
+                if (!_files.TryRemove(kv.Key, out var f)) continue;
+                try { f.Stream.Dispose(); } catch { }
+                try { File.Delete(f.PartPath); } catch (Exception e) { Log.Error("清理未完成的文件失败", e); }
+            }
         }
         b.VM.Fail(reason);
     }
