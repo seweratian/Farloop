@@ -1,0 +1,45 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>FreeRemote</AssemblyName>
+    <RootNamespace>FreeRemote</RootNamespace>
+    <Version>0.19.0</Version>
+    <Product>Farloop</Product>
+    <AssemblyTitle>Farloop</AssemblyTitle>
+    <Company>Farloop</Company>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <NoWarn>CS8618;CS8602;CS8604;CS8600;CS8625;CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="app.ico" />
+    <!-- 内置的 EasyTier（官方 v2.6.4 + 打洞重试加速），启动时替换已安装的版本 -->
+    <EmbeddedResource Include="EasyTier\easytier-core.exe" LogicalName="et-core" Condition="Exists('EasyTier\easytier-core.exe')" />
+    <EmbeddedResource Include="EasyTier\easytier-cli.exe" LogicalName="et-cli" Condition="Exists('EasyTier\easytier-cli.exe')" />
+    <!-- 虚拟显示器驱动（Virtual Display Driver 25.7.23，MIT，SignPath 签名）：“关闭对方屏幕”时用虚拟屏，让实体显示器熄灭 -->
+    <!-- Farloop 定制版 Sunshine（官方 2026.914.233613 + 串流中途改码率补丁，用于码率自适应） -->
+    <EmbeddedResource Include="SunshineFarloop\sunshine.exe" LogicalName="sunshine-farloop" Condition="Exists('SunshineFarloop\sunshine.exe')" />
+    <EmbeddedResource Include="VDD\MttVDD.inf" LogicalName="vdd-inf" />
+    <EmbeddedResource Include="VDD\MttVDD.dll" LogicalName="vdd-dll" />
+    <EmbeddedResource Include="VDD\MttVDD.cat" LogicalName="vdd-cat" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
+
+
+
+
+
+

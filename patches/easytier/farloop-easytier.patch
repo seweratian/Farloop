@@ -1,0 +1,450 @@
+diff --git a/easytier-contrib/easytier-android-jni/src/lib.rs b/easytier-contrib/easytier-android-jni/src/lib.rs
+index a9f3731..443a6f9 100644
+--- a/easytier-contrib/easytier-android-jni/src/lib.rs
++++ b/easytier-contrib/easytier-android-jni/src/lib.rs
+@@ -15,6 +15,7 @@ pub struct KeyValuePair {
+ }
+ 
+ // 声明外部 C 函数
++#[link(name = "easytier_ffi")] // FreeRemote：显式依赖 libeasytier_ffi.so（否则加载时找不到符号）
+ unsafe extern "C" {
+     fn set_tun_fd(inst_name: *const std::ffi::c_char, fd: std::ffi::c_int) -> std::ffi::c_int;
+     fn get_error_msg(out: *mut *const std::ffi::c_char);
+@@ -26,13 +27,14 @@ unsafe extern "C" {
+         length: usize,
+     ) -> std::ffi::c_int;
+     fn collect_network_infos(infos: *mut KeyValuePair, max_length: usize) -> std::ffi::c_int;
++    fn add_port_forwards(inst_name: *const std::ffi::c_char, spec: *const std::ffi::c_char) -> std::ffi::c_int;
+ }
+ 
+ // 初始化 Android 日志
+ static LOGGER_INIT: Lazy<()> = Lazy::new(|| {
+     android_logger::init_once(
+         android_logger::Config::default()
+-            .with_max_level(log::LevelFilter::Debug)
++            .with_max_level(log::LevelFilter::Warn)
+             .with_tag("EasyTier-JNI"),
+     );
+ });
+@@ -317,3 +319,19 @@ pub extern "system" fn Java_com_easytier_jni_EasyTierJNI_getLastError(
+         None => ptr::null_mut(),
+     }
+ }
++
++
++/// Farloop：运行中追加端口转发（失败返回 -1，不抛异常）
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_com_easytier_jni_EasyTierJNI_addPortForwards(
++    mut env: JNIEnv,
++    _class: JClass,
++    inst_name: JString,
++    spec: JString,
++) -> jint {
++    Lazy::force(&LOGGER_INIT);
++    let (Ok(n), Ok(s)) = (jstring_to_cstring(&mut env, &inst_name), jstring_to_cstring(&mut env, &spec)) else {
++        return -1;
++    };
++    unsafe { add_port_forwards(n.as_ptr(), s.as_ptr()) }
++}
+diff --git a/easytier-contrib/easytier-ffi/Cargo.toml b/easytier-contrib/easytier-ffi/Cargo.toml
+index 52e6624..99686b9 100644
+--- a/easytier-contrib/easytier-ffi/Cargo.toml
++++ b/easytier-contrib/easytier-ffi/Cargo.toml
+@@ -15,3 +15,4 @@ dashmap = "6.0"
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1"
+ uuid = "1.17.0"
++tokio = { version = "1", features = ["rt-multi-thread"] }
+diff --git a/easytier-contrib/easytier-ffi/src/lib.rs b/easytier-contrib/easytier-ffi/src/lib.rs
+index e9b65be..d2685e5 100644
+--- a/easytier-contrib/easytier-ffi/src/lib.rs
++++ b/easytier-contrib/easytier-ffi/src/lib.rs
+@@ -265,3 +265,77 @@ mod tests {
+         }
+     }
+ }
++
++
++/// # Safety
++/// Farloop：给正在运行的实例追加端口转发（不用重启组网，打通的 P2P 不会断）。
++/// spec 每行一条："tcp|udp 绑定地址:端口 目标地址:端口"
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn add_port_forwards(
++    inst_name: *const std::ffi::c_char,
++    spec: *const std::ffi::c_char,
++) -> std::ffi::c_int {
++    use easytier::proto::{
++        api::config::{ConfigPatchAction, InstanceConfigPatch, PatchConfigRequest, PortForwardPatch},
++        common::{PortForwardConfigPb, SocketType},
++        rpc_types::controller::BaseController,
++    };
++    let (name, spec) = unsafe {
++        if inst_name.is_null() || spec.is_null() {
++            set_error_msg("null argument");
++            return -1;
++        }
++        (
++            std::ffi::CStr::from_ptr(inst_name).to_string_lossy().into_owned(),
++            std::ffi::CStr::from_ptr(spec).to_string_lossy().into_owned(),
++        )
++    };
++    let Some(id) = INSTANCE_NAME_ID_MAP.get(&name).map(|v| *v) else {
++        set_error_msg("instance not found");
++        return -1;
++    };
++    let Some(svc) = INSTANCE_MANAGER.get_instance_service(&id) else {
++        set_error_msg("instance service not available");
++        return -1;
++    };
++    let mut forwards = Vec::new();
++    for line in spec.lines() {
++        let p: Vec<&str> = line.split_whitespace().collect();
++        if p.len() != 3 {
++            continue;
++        }
++        let (Ok(bind), Ok(dst)) = (p[1].parse::<std::net::SocketAddr>(), p[2].parse::<std::net::SocketAddr>()) else {
++            continue;
++        };
++        forwards.push(PortForwardPatch {
++            action: ConfigPatchAction::Add as i32,
++            cfg: Some(PortForwardConfigPb {
++                bind_addr: Some(bind.into()),
++                dst_addr: Some(dst.into()),
++                socket_type: if p[0] == "udp" { SocketType::Udp as i32 } else { SocketType::Tcp as i32 },
++            }),
++        });
++    }
++    if forwards.is_empty() {
++        return 0;
++    }
++    let req = PatchConfigRequest {
++        patch: Some(InstanceConfigPatch { port_forwards: forwards, ..Default::default() }),
++        instance: None,
++    };
++    // 新加的转发会在这个运行时上起后台任务（监听、收发），所以它必须一直活着，不能用完就丢
++    static PATCH_RT: once_cell::sync::Lazy<Option<tokio::runtime::Runtime>> = once_cell::sync::Lazy::new(|| {
++        tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("fr-portfwd").enable_all().build().ok()
++    });
++    let Some(rt) = PATCH_RT.as_ref() else {
++        set_error_msg("runtime unavailable");
++        return -1;
++    };
++    match rt.block_on(svc.get_config_service().patch_config(BaseController::default(), req)) {
++        Ok(_) => 0,
++        Err(e) => {
++            set_error_msg(&format!("add port forwards failed: {:?}", e));
++            -1
++        }
++    }
++}
+diff --git a/easytier/src/common/stun.rs b/easytier/src/common/stun.rs
+index 008a63f..a2867be 100644
+--- a/easytier/src/common/stun.rs
++++ b/easytier/src/common/stun.rs
+@@ -25,6 +25,22 @@ use crate::common::error::Error;
+ use super::dns::resolve_txt_record;
+ use super::stun_codec_ext::*;
+ 
++/// Farloop：打洞 IP 规则（环境变量 FR_PUBLIC_IP_PREFIX，如 "198.51"）。没有规则返回 None；IPv6 总是允许。
++pub fn fr_ip_allowed(ip: &std::net::IpAddr) -> Option<bool> {
++    let rule = std::env::var("FR_PUBLIC_IP_PREFIX").ok()?;
++    let prefixes: Vec<String> = rule
++        .split(|c| c == ',' || c == ';' || c == ' ')
++        .map(|s| s.trim().trim_end_matches('*').trim_end_matches('.').to_string())
++        .filter(|s| !s.is_empty())
++        .collect();
++    if prefixes.is_empty() {
++        return None;
++    }
++    let std::net::IpAddr::V4(v4) = ip else { return Some(true) };
++    let s = v4.to_string();
++    Some(prefixes.iter().any(|p| s == *p || s.starts_with(&format!("{}.", p))))
++}
++
+ const DEFAULT_UDP_STUN_SERVERS: &[&str] = &[
+     "txt:stun.easytier.cn",
+     "stun.miwifi.com",
+@@ -953,6 +969,31 @@ impl StunInfoCollectorTrait for StunInfoCollector {
+             public_ip.insert(v6.to_string());
+         }
+ 
++        // Farloop：多条宽带（多个公网 IPv4）时，只对外公布匹配用户规则的 IP，打洞都用这一个。
++        // 规则来自环境变量 FR_PUBLIC_IP_PREFIX，例如 "203.0" 或 "203.0.*,198.51"；没有匹配的就保持原样。
++        if let Ok(rule) = std::env::var("FR_PUBLIC_IP_PREFIX") {
++            let prefixes: Vec<String> = rule
++                .split(|c| c == ',' || c == ';' || c == ' ')
++                .map(|s| s.trim().trim_end_matches('*').trim_end_matches('.').to_string())
++                .filter(|s| !s.is_empty())
++                .collect();
++            if !prefixes.is_empty() {
++                let filtered: BTreeSet<String> = public_ip
++                    .iter()
++                    .filter(|ip| {
++                        ip.contains(':')
++                            || prefixes
++                                .iter()
++                                .any(|p| *ip == p || ip.starts_with(&format!("{}.", p)))
++                    })
++                    .cloned()
++                    .collect();
++                if filtered.iter().any(|ip| !ip.contains(':')) {
++                    public_ip = filtered;
++                }
++            }
++        }
++
+         StunInfo {
+             udp_nat_type: udp_result
+                 .as_ref()
+@@ -1011,7 +1052,21 @@ impl StunInfoCollectorTrait for StunInfoCollector {
+             return Err(Error::NotFound);
+         }
+ 
++        // Farloop：有打洞 IP 规则时，先问“上次检测时看到的是规则内 IP”的 STUN 服务器（国内的），
++        // 不用先挨个问境外服务器再被跳过，打洞监听能快几秒建好
++        if std::env::var("FR_PUBLIC_IP_PREFIX").is_ok() {
++            if let Some(r) = self.udp_nat_test_result.read().unwrap().clone() {
++                let good: Vec<SocketAddr> = r
++                    .stun_resps
++                    .iter()
++                    .filter(|x| x.mapped_socket_addr.map(|m| fr_ip_allowed(&m.ip()) == Some(true)).unwrap_or(false))
++                    .map(|x| x.stun_server_addr)
++                    .collect();
++                stun_servers.sort_by_key(|s| if good.contains(s) { 0 } else { 1 });
++            }
++        }
+         let mut client_builder = StunClientBuilder::new(udp.clone());
++        let mut fallback: Option<SocketAddr> = None;
+ 
+         for server in stun_servers.iter() {
+             let Ok(ret) = client_builder
+@@ -1023,12 +1078,30 @@ impl StunInfoCollectorTrait for StunInfoCollector {
+                 continue;
+             };
+             if let Some(mapped_addr) = ret.mapped_socket_addr {
+-                // make sure udp socket is available after return ok.
+-                client_builder.stop().await;
+-                return Ok(mapped_addr);
++                // Farloop：一条宽带两个出口 IP（如联通 9929：境外走 9929、国内走另一个）时，
++                // 境外 STUN 服务器看到的是另一个 IP，用它当打洞地址，对方的包和本机发出去的包不在同一个出口，必然打不通。
++                // 有打洞 IP 规则时，只采用规则内的 IP；都不匹配才退回第一个结果。
++                match fr_ip_allowed(&mapped_addr.ip()) {
++                    Some(false) => {
++                        tracing::info!(?server, ?mapped_addr, "skip stun mapping outside FR_PUBLIC_IP_PREFIX");
++                        if fallback.is_none() {
++                            fallback = Some(mapped_addr);
++                        }
++                        continue;
++                    }
++                    _ => {
++                        // make sure udp socket is available after return ok.
++                        client_builder.stop().await;
++                        return Ok(mapped_addr);
++                    }
++                }
+             }
+         }
+ 
++        if let Some(mapped_addr) = fallback {
++            client_builder.stop().await;
++            return Ok(mapped_addr);
++        }
+         Err(Error::NotFound)
+     }
+ 
+@@ -1220,7 +1293,7 @@ impl StunInfoCollector {
+                     }
+                 }
+ 
+-                let mut sleep_sec = 10;
++                let mut sleep_sec = 3; // Farloop：检测失败 3 秒后重试（原 10 秒）
+                 if let Ok(resp) = &udp_ret {
+                     nat_test_time.store(Local::now());
+                     *udp_nat_test_result.write().unwrap() = Some(resp.clone());
+@@ -1256,7 +1329,7 @@ impl StunInfoCollector {
+                 let tcp_ret = tcp_detector.detect_nat_type(0).await;
+                 tracing::debug!(?tcp_ret, "finish tcp nat type detect");
+ 
+-                let mut sleep_sec = 10;
++                let mut sleep_sec = 3; // Farloop：检测失败 3 秒后重试（原 10 秒）
+                 if let Ok(resp) = &tcp_ret {
+                     nat_test_time.store(Local::now());
+                     *tcp_nat_test_result.write().unwrap() = Some(resp.clone());
+diff --git a/easytier/src/connector/direct.rs b/easytier/src/connector/direct.rs
+index e6296f1..b1cc99b 100644
+--- a/easytier/src/connector/direct.rs
++++ b/easytier/src/connector/direct.rs
+@@ -629,7 +629,7 @@ impl DirectConnectorManagerData {
+         dst_peer_id: PeerId,
+     ) -> Result<(), Error> {
+         let mut backoff =
+-            udp_hole_punch::BackOff::new(vec![1000, 2000, 2000, 5000, 5000, 10000, 30000, 60000]);
++            udp_hole_punch::BackOff::new(vec![1000, 2000, 2000, 5000, 5000, 10000]) /* FreeRemote：最多 10 秒重试（原版 60 秒） */;
+         let mut attempt = 0;
+         loop {
+             if self.peer_black_list.contains(&dst_peer_id) {
+@@ -740,7 +740,7 @@ impl PeerTaskLauncher for DirectConnectorLauncher {
+     async fn all_task_done(&self, _data: &Self::Data) {}
+ 
+     fn loop_interval_ms(&self) -> u64 {
+-        5000
++        1000 // Farloop：原 5 秒，简单网络（局域网/公网/IPv6）直连更快
+     }
+ }
+ 
+diff --git a/easytier/src/connector/tcp_hole_punch.rs b/easytier/src/connector/tcp_hole_punch.rs
+index 9baaeaa..5cd74a6 100644
+--- a/easytier/src/connector/tcp_hole_punch.rs
++++ b/easytier/src/connector/tcp_hole_punch.rs
+@@ -520,7 +520,7 @@ impl PeerTaskLauncher for TcpHolePunchPeerTaskLauncher {
+     async fn all_task_done(&self, _data: &Self::Data) {}
+ 
+     fn loop_interval_ms(&self) -> u64 {
+-        5000
++        1000 // Farloop：原 5 秒，简单网络（局域网/公网/IPv6）直连更快
+     }
+ }
+ 
+diff --git a/easytier/src/connector/udp_hole_punch/common.rs b/easytier/src/connector/udp_hole_punch/common.rs
+index e82b066..6b7ac68 100644
+--- a/easytier/src/connector/udp_hole_punch/common.rs
++++ b/easytier/src/connector/udp_hole_punch/common.rs
+@@ -697,6 +697,8 @@ pub(crate) async fn send_symmetric_hole_punch_packet(
+     tracing::debug!("sending hard symmetric hole punching packet");
+     let mut sent_packets = 0;
+     let mut cur_port_idx = port_start_idx;
++    // Farloop：按时间配速，约 6000 个（端口×IP）/秒，不受系统定时器精度影响
++    let start = tokio::time::Instant::now();
+     while sent_packets < max_packets {
+         let port = ports[cur_port_idx % ports.len()];
+         for pub_ip in public_ips {
+@@ -708,7 +710,12 @@ pub(crate) async fn send_symmetric_hole_punch_packet(
+             sent_packets += 1;
+         }
+         cur_port_idx = cur_port_idx.wrapping_add(1);
+-        tokio::time::sleep(Duration::from_millis(1)).await;
++        let due = start + Duration::from_micros(sent_packets as u64 * 166);
++        if tokio::time::Instant::now() < due {
++            tokio::time::sleep_until(due).await;
++        } else {
++            tokio::task::yield_now().await;
++        }
+     }
+     Ok(cur_port_idx % ports.len())
+ }
+diff --git a/easytier/src/connector/udp_hole_punch/mod.rs b/easytier/src/connector/udp_hole_punch/mod.rs
+index e1c2e14..691a803 100644
+--- a/easytier/src/connector/udp_hole_punch/mod.rs
++++ b/easytier/src/connector/udp_hole_punch/mod.rs
+@@ -269,7 +269,7 @@ impl UdpHoePunchConnectorData {
+ 
+     #[tracing::instrument(skip(self))]
+     async fn cone_to_cone(self: Arc<Self>, task_info: PunchTaskInfo) -> Result<(), Error> {
+-        let mut backoff = BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000]);
++        let mut backoff = BackOff::new(vec![0, 500, 1000, 2000, 3000, 4000, 5000, 6000]) /* Farloop：第一轮不等，最多 6 秒重试一次 */;
+ 
+         loop {
+             backoff.sleep_for_next_backoff().await;
+@@ -293,15 +293,15 @@ impl UdpHoePunchConnectorData {
+     #[tracing::instrument(skip(self))]
+     async fn sym_to_cone(self: Arc<Self>, task_info: PunchTaskInfo) -> Result<(), Error> {
+         let mut backoff =
+-            BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
++            BackOff::new(vec![0, 500, 500, 1000, 1000, 2000, 3000, 5000]) /* Farloop：前几轮几乎不等，失败后最多 5 秒重试（原版最终 64 秒） */;
+         let mut round = 0;
+         let mut port_idx = rand::random();
+ 
+         loop {
+             backoff.sleep_for_next_backoff().await;
+ 
+-            // always try cone first
+-            if !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
++            // Farloop：锥形打洞只在第一轮试一次（本机是对称型时它基本不会成功，每轮都试会白白多等几秒）
++            if round == 2 && !RUN_TESTING.load(std::sync::atomic::Ordering::Relaxed) {
+                 let ret = self
+                     .cone_client
+                     .do_hole_punching(task_info.dst_peer_id)
+@@ -339,7 +339,7 @@ impl UdpHoePunchConnectorData {
+     #[tracing::instrument(skip(self))]
+     async fn both_easy_sym(self: Arc<Self>, task_info: PunchTaskInfo) -> Result<(), Error> {
+         let mut backoff =
+-            BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
++            BackOff::new(vec![0, 500, 1000, 2000, 3000, 4000, 5000, 6000]) /* Farloop：第一轮不等，失败后最多 6 秒重试一次 */;
+ 
+         loop {
+             backoff.sleep_for_next_backoff().await;
+@@ -524,7 +524,7 @@ impl PeerTaskLauncher for UdpHolePunchPeerTaskLauncher {
+     }
+ 
+     fn loop_interval_ms(&self) -> u64 {
+-        5000
++        1000 // Farloop：原 5 秒，对方信息一到就开打
+     }
+ }
+ 
+diff --git a/easytier/src/connector/udp_hole_punch/sym_to_cone.rs b/easytier/src/connector/udp_hole_punch/sym_to_cone.rs
+index b527a50..1030877 100644
+--- a/easytier/src/connector/udp_hole_punch/sym_to_cone.rs
++++ b/easytier/src/connector/udp_hole_punch/sym_to_cone.rs
+@@ -37,7 +37,8 @@ use crate::{
+ 
+ use super::common::{PunchHoleServerCommon, UdpNatType, UdpSocketArray};
+ 
+-const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 84;
++// Farloop：对称型 NAT（4G/5G）一侧多开端口，生日碰撞命中率约提高 3 倍（原 84）
++const UDP_ARRAY_SIZE_FOR_HARD_SYM: usize = 384;
+ 
+ pub(crate) struct PunchSymToConeHoleServer {
+     common: Arc<PunchHoleServerCommon>,
+@@ -172,19 +173,18 @@ impl PunchSymToConeHoleServer {
+         // send max k1 packets if we are predicting the dst port
+         let max_k1: u32 = 180;
+         // send max k2 packets if we are sending to random port
+-        let mut max_k2: u32 = rand::thread_rng().gen_range(600..800);
+-        if round > 2 {
+-            max_k2 = max_k2.mul(2).div(round).max(max_k1);
+-        }
++        // Farloop：锥形一侧每轮向随机端口多发约 4 倍（原 600~800，且越往后越少），打洞更激进、更快
++        let max_k2: u32 = rand::thread_rng().gen_range(3200..4000).max(max_k1);
++        let _ = round;
+ 
+-        let mut next_port_index = 0;
++        let mut next_port_index = last_port_index;
+         for _ in 0..2 {
+             next_port_index = send_symmetric_hole_punch_packet(
+                 &self.shuffled_port_vec,
+                 listener.clone(),
+                 transaction_id,
+                 &public_ips,
+-                last_port_index,
++                next_port_index,
+                 max_k2 as usize,
+             )
+             .await
+@@ -447,7 +447,8 @@ impl PunchSymToConeHoleClient {
+         ))?;
+ 
+         // try direct connect first
+-        if self.try_direct_connect.load(Ordering::Relaxed)
++        if round == 2 // Farloop：直连放到第三轮当兜底（对称型 NAT 下基本不会成功，放前面会白等超时）
++            && self.try_direct_connect.load(Ordering::Relaxed)
+             && let Ok(tunnel) = try_connect_with_socket(
+                 global_ctx.clone(),
+                 Arc::new(UdpSocket::bind("0.0.0.0:0").await?),
+diff --git a/easytier/src/gateway/socks5.rs b/easytier/src/gateway/socks5.rs
+index 0cd5d07..7d02a5c 100644
+--- a/easytier/src/gateway/socks5.rs
++++ b/easytier/src/gateway/socks5.rs
+@@ -398,7 +398,11 @@ impl Socks5ServerNet {
+                 Some(BufferSize {
+                     tcp_rx_size: 1024 * 128,
+                     tcp_tx_size: 1024 * 128,
+-                    ..Default::default()
++                    // Farloop：原 8KB / 32 个包，免 VPN 模式下串流一帧的包一起到达就溢出，丢帧 99%
++                    udp_rx_size: 1024 * 1024 * 4,
++                    udp_tx_size: 1024 * 1024,
++                    udp_rx_meta_size: 4096,
++                    udp_tx_meta_size: 1024,
+                 }),
+             ),
+         );

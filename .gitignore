@@ -1,0 +1,20 @@
+# .NET
+desktop/bin/
+desktop/obj/
+*.user
+.vs/
+# 打过补丁的 Sunshine 太大（70 MB），按 README 自行编译后放进来
+desktop/SunshineFarloop/sunshine.exe
+
+# Android / Gradle
+android/**/build/
+android/.gradle/
+android/local.properties
+android/.idea/
+*.iml
+android/app/.cxx/
+
+# 其他
+*.apk
+*.exe.part
+tools/ratetest/*.exe

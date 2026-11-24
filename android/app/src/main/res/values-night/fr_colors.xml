@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="fr_bg">#000000</color>
+    <color name="fr_card">#1C1C1E</color>
+    <color name="fr_text">#FFFFFF</color>
+    <bool name="fr_light_bars">false</bool>
+</resources>

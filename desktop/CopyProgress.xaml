@@ -1,0 +1,84 @@
+<Window x:Class="FreeRemote.CopyProgress"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Topmost="True" ShowInTaskbar="False" ShowActivated="False" ResizeMode="NoResize"
+        SizeToContent="WidthAndHeight" FontFamily="{StaticResource UiFont}"
+        TextOptions.TextFormattingMode="Display">
+
+    <!-- 拖拽复制的浮动进度卡片：和画面信息卡同一套深色毛玻璃风格，鼠标可穿透，不挡操作 -->
+    <ItemsControl x:Name="List" Margin="8">
+        <ItemsControl.ItemTemplate>
+            <DataTemplate>
+                <Border CornerRadius="12" Background="#F21C1C1E" BorderBrush="#26FFFFFF" BorderThickness="1"
+                        Padding="14,11,14,12" Margin="0,0,0,8" Width="330">
+                    <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="3" Direction="270" Opacity="0.35"/></Border.Effect>
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Width="28" Height="28" CornerRadius="8" Background="#333D7BF7" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Glyph}" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14"
+                                           Foreground="#7FB2FF" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="10,0,8,0" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding Title}" Foreground="White" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="{Binding Subtitle}" Foreground="#A0FFFFFF" FontSize="11.5" Margin="0,1,0,0" TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                            <TextBlock Grid.Column="2" Foreground="White" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"
+                                       Text="{Binding Progress, StringFormat={}{0:0}%}"/>
+                        </Grid>
+
+                        <!-- 进度条 -->
+                        <Grid Margin="0,10,0,0" Height="6">
+                            <Border CornerRadius="3" Background="#26FFFFFF"/>
+                            <ProgressBar Value="{Binding Progress, Mode=OneWay}" Maximum="100" Height="6" BorderThickness="0" Background="Transparent">
+                                <ProgressBar.Template>
+                                    <ControlTemplate TargetType="ProgressBar">
+                                        <Grid x:Name="PART_Track">
+                                            <Border x:Name="PART_Indicator" HorizontalAlignment="Left" CornerRadius="3">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Setter Property="Background">
+                                                            <Setter.Value>
+                                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                                    <GradientStop Color="#4CC2FF" Offset="0"/>
+                                                                    <GradientStop Color="#3D7BF7" Offset="1"/>
+                                                                </LinearGradientBrush>
+                                                            </Setter.Value>
+                                                        </Setter>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Failed}" Value="True">
+                                                                <Setter Property="Background" Value="#FF453A"/>
+                                                            </DataTrigger>
+                                                            <MultiDataTrigger>
+                                                                <MultiDataTrigger.Conditions>
+                                                                    <Condition Binding="{Binding Finished}" Value="True"/>
+                                                                    <Condition Binding="{Binding Failed}" Value="False"/>
+                                                                </MultiDataTrigger.Conditions>
+                                                                <Setter Property="Background" Value="#34C759"/>
+                                                            </MultiDataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                            </Border>
+                                        </Grid>
+                                    </ControlTemplate>
+                                </ProgressBar.Template>
+                            </ProgressBar>
+                        </Grid>
+
+                        <Grid Margin="0,8,0,0">
+                            <TextBlock Text="{Binding DoneText}" Foreground="#C8FFFFFF" FontSize="11.5"/>
+                            <TextBlock Text="{Binding SpeedText}" Foreground="#C8FFFFFF" FontSize="11.5" HorizontalAlignment="Right"/>
+                        </Grid>
+                        <TextBlock Text="{Binding EtaText}" Foreground="#A0FFFFFF" FontSize="11.5" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                </Border>
+            </DataTemplate>
+        </ItemsControl.ItemTemplate>
+    </ItemsControl>
+</Window>

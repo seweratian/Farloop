@@ -1,0 +1,276 @@
+diff --git a/src/globals.h b/src/globals.h
+index 2c7ee9b..581352d 100644
+--- a/src/globals.h
++++ b/src/globals.h
+@@ -57,6 +57,7 @@ namespace mail {
+   MAIL(touch_port);  ///< Touch port.
+   MAIL(idr);  ///< IDR.
+   MAIL(invalidate_ref_frames);  ///< Invalidate ref frames.
++  MAIL(set_bitrate);  ///< Farloop: change the encoder bitrate mid-stream (kbps).
+   MAIL(gamepad_feedback);  ///< Gamepad feedback.
+   MAIL(hdr);  ///< HDR.
+ #undef MAIL
+diff --git a/src/nvenc/nvenc_base.cpp b/src/nvenc/nvenc_base.cpp
+index d20ca83..1788977 100644
+--- a/src/nvenc/nvenc_base.cpp
++++ b/src/nvenc/nvenc_base.cpp
+@@ -672,6 +672,15 @@ namespace NVENC_NAMESPACE {
+                      << frame_size_format % (client_config.bitrate / 8. / client_config.framerate) << " kB";
+     log_created_encoder(init_params, enc_config, config, client_config, buffer_format);
+ 
++    // Farloop: remember what the encoder was created with so set_bitrate() can reconfigure it
++    farloop_enc_config = enc_config;
++    farloop_init_params = init_params;
++    farloop_init_params.encodeConfig = &farloop_enc_config;
++    farloop_initial_kbps = farloop_current_kbps = (std::uint32_t) client_config.bitrate;
++    farloop_framerate = client_config.framerate > 0 ? (std::uint32_t) client_config.framerate : 60;
++    farloop_vbv_increase = config.vbv_percentage_increase;
++    farloop_custom_vbv = get_encoder_cap(init_params.encodeGUID, NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE);
++
+     encoder_state = {};
+     fail_guard.disable();
+     return true;
+@@ -792,6 +801,38 @@ namespace NVENC_NAMESPACE {
+     return encoded_frame;
+   }
+ 
++  bool nvenc_base::set_bitrate(std::uint32_t kbps) {
++    if (!encoder || farloop_initial_kbps == 0) {
++      return false;
++    }
++    kbps = std::clamp<std::uint32_t>(kbps, 300, farloop_initial_kbps);
++    if (kbps == farloop_current_kbps) {
++      return true;
++    }
++
++    farloop_enc_config.rcParams.averageBitRate = kbps * 1000;
++    if (farloop_custom_vbv) {
++      auto vbv = kbps * 1000 / farloop_framerate;
++      if (farloop_vbv_increase > 0) {
++        vbv += vbv * farloop_vbv_increase / 100;
++      }
++      farloop_enc_config.rcParams.vbvBufferSize = vbv;
++    }
++
++    NV_ENC_RECONFIGURE_PARAMS params = {.version = NV_ENC_RECONFIGURE_PARAMS_VER};
++    params.reInitEncodeParams = farloop_init_params;
++    params.reInitEncodeParams.encodeConfig = &farloop_enc_config;
++    params.resetEncoder = 0;
++    params.forceIDR = 0;
++    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &params))) {
++      BOOST_LOG(error) << "NvEnc: NvEncReconfigureEncoder() to " << kbps << " kbps failed: " << last_nvenc_error_string;
++      return false;
++    }
++    BOOST_LOG(info) << "NvEnc: bitrate " << farloop_current_kbps << " -> " << kbps << " kbps (Farloop adaptive)";
++    farloop_current_kbps = kbps;
++    return true;
++  }
++
+   bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
+     if (!encoder || !encoder_params.rfi) {
+       return false;
+diff --git a/src/nvenc/nvenc_base.h b/src/nvenc/nvenc_base.h
+index 8f9c8b0..7dd3bb6 100644
+--- a/src/nvenc/nvenc_base.h
++++ b/src/nvenc/nvenc_base.h
+@@ -75,6 +75,8 @@ namespace NVENC_NAMESPACE {
+      */
+     bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) override;
+ 
++    bool set_bitrate(std::uint32_t kbps) override;
++
+   protected:
+     /**
+      * @brief Required. Used for loading NvEnc library and setting `nvenc` variable with `NvEncodeAPICreateInstance()`.
+@@ -132,6 +134,15 @@ namespace NVENC_NAMESPACE {
+ 
+     std::string last_nvenc_error_string;  ///< Last NVENC error string.
+ 
++    // Farloop: parameters the encoder was created with, for NvEncReconfigureEncoder
++    NV_ENC_INITIALIZE_PARAMS farloop_init_params = {};
++    NV_ENC_CONFIG farloop_enc_config = {};
++    std::uint32_t farloop_initial_kbps = 0;
++    std::uint32_t farloop_current_kbps = 0;
++    std::uint32_t farloop_framerate = 60;
++    int farloop_vbv_increase = 0;
++    bool farloop_custom_vbv = false;
++
+     // Derived classes set these variables
+     void *device = nullptr;  ///< Platform-specific handle of encoding device.
+                              ///< Should be set in constructor or `init_library()`.
+diff --git a/src/nvenc/nvenc_encoder.h b/src/nvenc/nvenc_encoder.h
+index 4c75058..aadce2c 100644
+--- a/src/nvenc/nvenc_encoder.h
++++ b/src/nvenc/nvenc_encoder.h
+@@ -70,6 +70,15 @@ namespace nvenc {
+      * @return `true` on success, `false` on error.
+      */
+     virtual bool invalidate_ref_frames(std::uint64_t first_frame, std::uint64_t last_frame) = 0;
++
++    /**
++     * @brief Farloop: change the CBR bitrate mid-stream with NvEncReconfigureEncoder (no keyframe).
++     * @param kbps New bitrate in kbps; clamped to the bitrate the encoder was created with.
++     * @return `true` on success.
++     */
++    virtual bool set_bitrate(std::uint32_t kbps) {
++      return false;
++    }
+   };
+ 
+ }  // namespace nvenc
+diff --git a/src/stream.cpp b/src/stream.cpp
+index 1291c9c..316a20d 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -52,7 +52,8 @@ constexpr int IDX_RUMBLE_TRIGGER_DATA = 12;  ///< Control-stream message index f
+ constexpr int IDX_SET_MOTION_EVENT = 13;  ///< Control-stream message index for set motion event.
+ constexpr int IDX_SET_RGB_LED = 14;  ///< Control-stream message index for set rgb led.
+ constexpr int IDX_SET_ADAPTIVE_TRIGGERS = 15;  ///< Control-stream message index for set adaptive triggers.
+-constexpr int IDX_SET_PLAYER_LEDS = 16;  ///< Control-stream message index for set player indicator LEDs.
++constexpr int IDX_SET_PLAYER_LEDS = 16;
++constexpr short FARLOOP_SET_BITRATE = 0x55F0;  ///< Farloop extension: payload = uint32 little-endian kbps.  ///< Control-stream message index for set player indicator LEDs.
+ 
+ static const short packetTypes[] = {
+   0x0305,  // Start A
+@@ -513,6 +514,7 @@ namespace stream {
+ 
+       safe::mail_raw_t::event_t<bool> idr_events;  ///< Event requesting an instantaneous decoder refresh frame.
+       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;  ///< Event carrying the reference-frame range to invalidate.
++      safe::mail_raw_t::event_t<int> set_bitrate_events;  ///< Farloop: new encoder bitrate (kbps).
+ 
+       std::unique_ptr<platf::deinit_t> qos;  ///< Lifetime guard for video-socket QoS configuration.
+     } video;  ///< Video worker thread state for the active stream.
+@@ -1209,6 +1211,17 @@ namespace stream {
+       session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+     });
+ 
++    server->map(FARLOOP_SET_BITRATE, [&](session_t *session, const std::string_view &payload) {
++      if (payload.size() < 4) {
++        return;
++      }
++      std::uint32_t kbps;
++      std::memcpy(&kbps, payload.data(), 4);
++      kbps = util::endian::little(kbps);
++      BOOST_LOG(debug) << "type [FARLOOP_SET_BITRATE] "sv << kbps << " kbps"sv;
++      session->video.set_bitrate_events->raise((int) kbps);
++    });
++
+     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
+       BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
+ 
+@@ -2330,6 +2343,7 @@ namespace stream {
+ 
+       session->video.idr_events = mail->event<bool>(mail::idr);
+       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
++      session->video.set_bitrate_events = mail->event<int>(mail::set_bitrate);
+       session->video.lowseq = 0;
+       session->video.ping_payload = launch_session.av_ping_payload;
+       if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {
+diff --git a/src/video.cpp b/src/video.cpp
+index 843a19a..99fdc17 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -528,6 +528,41 @@ namespace video {
+       request_idr_frame();
+     }
+ 
++    /**
++     * @brief Farloop: scale the FFmpeg rate-control fields. Encoders that support reconfiguration
++     *        (libx264, QSV, FFmpeg NVENC...) pick the new values up on the next frame; others ignore them.
++     */
++    void set_bitrate(int kbps) override {
++      auto ctx = avcodec_ctx.get();
++      if (!ctx || kbps <= 0) {
++        return;
++      }
++      if (initial_max_rate == 0) {
++        initial_max_rate = ctx->rc_max_rate;
++        initial_bit_rate = ctx->bit_rate;
++        initial_min_rate = ctx->rc_min_rate;
++        initial_buffer_size = ctx->rc_buffer_size;
++      }
++      if (initial_max_rate <= 0) {
++        return;
++      }
++      double r = std::clamp((double) kbps * 1000.0 / (double) initial_max_rate, 0.02, 1.0);
++      ctx->rc_max_rate = (int64_t) (initial_max_rate * r);
++      ctx->bit_rate = (int64_t) (initial_bit_rate * r);
++      if (initial_min_rate > 0) {
++        ctx->rc_min_rate = (int64_t) (initial_min_rate * r);
++      }
++      if (initial_buffer_size > 0) {
++        ctx->rc_buffer_size = (int) (initial_buffer_size * r);
++      }
++      BOOST_LOG(debug) << "Farloop: avcodec bitrate -> "sv << ctx->bit_rate;
++    }
++
++    int64_t initial_max_rate = 0;  ///< Farloop: rate-control values the stream started with.
++    int64_t initial_bit_rate = 0;
++    int64_t initial_min_rate = 0;
++    int initial_buffer_size = 0;
++
+     avcodec_ctx_t avcodec_ctx;  ///< FFmpeg codec context owned by the encode session.
+     std::unique_ptr<platf::avcodec_encode_device_t> device;  ///< Platform device used by the FFmpeg hardware encoder.
+ 
+@@ -597,6 +632,15 @@ namespace video {
+       }
+     }
+ 
++    /**
++     * @brief Farloop: reconfigure NVENC to a new bitrate (no keyframe, no reset).
++     */
++    void set_bitrate(int kbps) override {
++      if (device && device->nvenc && kbps > 0) {
++        device->nvenc->set_bitrate((std::uint32_t) kbps);
++      }
++    }
++
+     /**
+      * @brief Submit the next frame to NVENC and return the encoded payload.
+      *
+@@ -2439,6 +2483,7 @@ namespace video {
+     auto packets = mail::man->queue<packet_t>(mail::video_packets);
+     auto idr_events = mail->event<bool>(mail::idr);
+     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
++    auto set_bitrate_events = mail->event<int>(mail::set_bitrate);
+ 
+     {
+       // Load a dummy image into the AVFrame to ensure we have something to encode
+@@ -2460,6 +2505,19 @@ namespace video {
+         }
+       }
+ 
++      // Farloop: only the latest requested bitrate matters
++      {
++        std::optional<int> kbps;
++        while (set_bitrate_events->peek()) {
++          if (auto k = set_bitrate_events->pop(0ms)) {
++            kbps = *k;
++          }
++        }
++        if (kbps) {
++          session->set_bitrate(*kbps);
++        }
++      }
++
+       if (idr_events->peek()) {
+         requested_idr_frame = true;
+         idr_events->pop();
+diff --git a/src/video.h b/src/video.h
+index 63f3cf5..85d0018 100644
+--- a/src/video.h
++++ b/src/video.h
+@@ -449,6 +449,13 @@ namespace video {
+      * @param last_frame Last frame.
+      */
+     virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
++
++    /**
++     * @brief Farloop: change the target bitrate mid-stream without a keyframe.
++     * @param kbps New bitrate in kbps (never above the bitrate the stream started with).
++     */
++    virtual void set_bitrate(int kbps) {
++    }
+   };
+ 
+   // encoders
