@@ -41,6 +41,8 @@ public enum MsgType : byte
     WakeResult = 72,
     SetDisplay = 80,    // 控制端 → 被控端：换一块屏幕串流 SetDisplayMsg
     DisplayResult = 81, // 被控端 → 控制端：DisplayResultMsg（Sunshine 已重启好，可以重连画面）
+    DisplayShotsReq = 83, // 控制端 → 被控端：要每块屏幕的缩略图（切换屏幕时直接看画面选）
+    DisplayShots = 84,    // 被控端 → 控制端：DisplayShotsMsg
     DisplayLive = 82,   // 控制端 → 被控端：SetDisplayMsg，串流中已用 Ctrl+Alt+Shift+Fn 切到这块屏，记下来（不重启）
     // ---- 文件管理（手机端双栏文件管理器用；需要对方开着“允许被远程”）----
     FsList = 90,        // 列目录 FsListMsg（Path 为空 = 根：磁盘 + 桌面/下载/文档）
@@ -70,6 +72,8 @@ public record HelloMsg(string Name, string Ip, string Nonce, string Version, str
 public record DeviceInfoMsg(string Name, string Ip, string[] Macs, string? Broadcast, string? GatewayMac, string Version,
     HostDisplay[]? Displays = null, string? CurrentDisplay = null, bool AdaptiveBitrate = false);
 public record SetDisplayMsg(string Id);
+public record DisplayShot(string Id, string Name, bool Primary, int Width, int Height, int StreamIndex, string? Jpg);
+public record DisplayShotsMsg(DisplayShot[] Displays, string Current);
 public record DisplayResultMsg(bool Ok, string Message);
 public record WakeRequestMsg(string[] Macs, string? Broadcast, string TargetName);
 public record WakeResultMsg(bool Ok, string Message);

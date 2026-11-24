@@ -13,8 +13,9 @@
 #include "Limelight-internal.h"
 
 #define FR_MIN_OWD_WINDOW_MS 10000
-#define FR_QUEUE_HIGH_MS 30.0
-#define FR_QUEUE_LOW_MS 10.0
+// 0.20：30 / 10 是 airhand 按有线 / Wi-Fi 定的；5G 下 40~55 ms 的抖动很常见，按 30 算会把码率一路砍到底（实测降到 1.3M）
+#define FR_QUEUE_HIGH_MS 60.0
+#define FR_QUEUE_LOW_MS 20.0
 #define FR_STANDING 3
 #define FR_RATE_SPAN_MS 1000
 #define FR_MIN_RATE_SPAN_MS 100
@@ -226,7 +227,10 @@ static bool frUpdate(uint64_t now, double standing, double busy, double used, do
             frHold = 0;
             return true;
         }
-        double next = busy > 0 ? (busy * 0.85 < frEstimate * 0.9 ? busy * 0.85 : frEstimate * 0.9) : frEstimate * 0.8;
+        // 编码器实际用的码率远低于估计值时（画面静止、帧很小），量到的“带宽”只是画面本身的码率，不能拿来定码率
+        bool linkBusy = busy > 0 && used > 0 && used >= frEstimate * 0.5;
+        double next = linkBusy ? (busy * 0.85 < frEstimate * 0.9 ? busy * 0.85 : frEstimate * 0.9) : frEstimate * 0.85;
+        if (next < frEstimate * 0.7) next = frEstimate * 0.7; // 一次最多降 30%，抖一下不会掉到底
         frEstimate = next > frFloor() ? next : frFloor();
         if (busy > 0) frCapacity = busy;
         frEpisodeTimes = (frEpisodeTimes < 0 ? 0 : frEpisodeTimes) + 1;

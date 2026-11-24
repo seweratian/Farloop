@@ -39,7 +39,7 @@ public final class FrHub {
     private final Map<String, JsonObject> deviceInfo = new ConcurrentHashMap<>();
 
     public static final int FS_LIST = 90, FS_LIST_RESULT = 91, FS_PULL = 92, FS_OP = 93, FS_OP_RESULT = 94,
-            SET_DISPLAY = 80, DISPLAY_RESULT = 81, DISPLAY_LIVE = 82;
+            SET_DISPLAY = 80, DISPLAY_RESULT = 81, DISPLAY_LIVE = 82, DISPLAY_SHOTS_REQ = 83, DISPLAY_SHOTS = 84;
 
     /** 列电脑上的目录（path 为空 = 磁盘和常用文件夹）。阻塞。 */
     public JsonObject fsList(String ip, String path) throws Exception {
@@ -167,6 +167,11 @@ public final class FrHub {
                 if (f != null) f.complete(FrSession.json(p));
                 break;
             }
+            case DISPLAY_SHOTS: {
+                CompletableFuture<JsonObject> f = pendingShots.remove(s.remoteIp);
+                if (f != null) f.complete(FrSession.json(p));
+                break;
+            }
             case DISPLAY_RESULT: {
                 CompletableFuture<JsonObject> f = pendingDisplay.remove(s.remoteIp);
                 if (f != null) f.complete(FrSession.json(p));
@@ -241,6 +246,22 @@ public final class FrHub {
     }
 
     private final Map<String, CompletableFuture<JsonObject>> pendingDisplay = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<JsonObject>> pendingShots = new ConcurrentHashMap<>();
+
+    /** 每块屏幕的缩略图（电脑端 0.20 起）：{Displays:[{Id,Name,Primary,Width,Height,StreamIndex,Jpg}], Current}；拿不到返回 null。阻塞 */
+    public JsonObject displayShots(String ip) {
+        ip = FrNet.toVirtual(ip);
+        try {
+            FrSession s = session(ip);
+            CompletableFuture<JsonObject> f = new CompletableFuture<>();
+            pendingShots.put(ip, f);
+            s.send(DISPLAY_SHOTS_REQ, new byte[0]);
+            return f.get(6, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            pendingShots.remove(ip);
+            return null;
+        }
+    }
 
     // ---------------- 设备详情 / 终端 / 快速启动（与电脑端 RemoteTools 对应） ----------------
     public static final int GOODBYE = 123;

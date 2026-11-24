@@ -698,6 +698,14 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
                     Ui(() => { if (_edgeOn) { Drag?.Edge(false); Drag?.Edge(true); } }); // 边缘接收条移到新屏幕
                 });
                 break;
+            case MsgType.DisplayShotsReq:
+                if (Controllable(s)) _ = Task.Run(async () =>
+                {
+                    DisplayShotsMsg m;
+                    try { m = HostDisplays.Shots(); } catch (Exception e) { Log.Error("屏幕缩略图失败", e); m = new DisplayShotsMsg(Array.Empty<DisplayShot>(), ""); }
+                    try { await s.SendJsonAsync(MsgType.DisplayShots, m); } catch { }
+                });
+                break;
             case MsgType.DisplayLive:
                 if (Controllable(s))
                 {

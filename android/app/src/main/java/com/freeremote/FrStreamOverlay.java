@@ -361,7 +361,8 @@ public final class FrStreamOverlay {
         LinearLayout tiles = ui.row();
         tiles.addView(tile(R.drawable.fr_ic_exit, "退出远控", false, v -> { closeSheet(); game.frQuitNow(); }));
         tiles.addView(tile(R.drawable.fr_ic_rotate, "旋转屏幕", false, v -> rotate()));
-        tiles.addView(tile(R.drawable.fr_ic_mouse, "按键布局", false, v -> { closeSheet(); startEdit(); }));
+        List<String[]> displays = displays();
+        if (displays.size() > 1) tiles.addView(tile(R.drawable.fr_ic_desktop, "切换屏幕", false, v -> pickDisplay(displays)));
         tiles.addView(tile(R.drawable.fr_ic_volume, muted ? "已静音" : "声音", !muted, v -> { toggleMute(); refreshSheet(); }));
         tiles.addView(tile(R.drawable.fr_ic_eye, "仅观看", viewOnly, v -> { viewOnly = !viewOnly; applyMode(); refreshSheet(); }));
         boolean priv = FrHub.get(game).privacyOn(host);
@@ -371,8 +372,7 @@ public final class FrStreamOverlay {
         }));
         tiles.addView(tile(R.drawable.fr_ic_pip, "小窗模式", false, v -> { closeSheet(); game.frEnterPip(); }));
         tiles.addView(tile(R.drawable.fr_ic_speed, "性能信息", false, v -> game.toggleHUD()));
-        List<String[]> displays = displays();
-        if (displays.size() > 1) tiles.addView(tile(R.drawable.fr_ic_desktop, "切换屏幕", false, v -> pickDisplay(displays)));
+        tiles.addView(tile(R.drawable.fr_ic_mouse, "按键布局", false, v -> { closeSheet(); startEdit(); })); // 不常用，放最后
         HorizontalScrollView hs = new HorizontalScrollView(game);
         hs.setHorizontalScrollBarEnabled(false);
         hs.addView(tiles);
@@ -401,9 +401,10 @@ public final class FrStreamOverlay {
         LinearLayout qrow = ui.row();
         qrow.setPadding(ui.dp(8), ui.dp(4), ui.dp(4), ui.dp(10));
         int curQ = Math.min(FrStreamHooks.quality(game), 4);
-        String[] qn = {"流畅", "标准", "高清", "超清"};
+        String[] qn = {"流畅", "标准", "高清", "超清", "自定义"};
         boolean live = com.limelight.nvstream.jni.MoonBridge.farloopGetBitrateKbps() > 0 && FrStreamHooks.quality(game) < 4;
-        LinearLayout qseg = ui.segmented(qn, curQ > 3 ? -1 : curQ, i -> {
+        LinearLayout qseg = ui.segmented(qn, curQ, i -> {
+            if (i == 4) { showCustomQuality(); return; } // 自定义：打开参数面板（已选中时再点也打开）
             if (i == FrStreamHooks.quality(game)) return;
             FrStreamHooks.setQuality(game, i);
             if (live) {
@@ -420,7 +421,9 @@ public final class FrStreamOverlay {
         }, 0xFF1C1C1E, ui.accent, 0xCCFFFFFF, Color.WHITE);
         qrow.addView(qseg, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         qCard.addView(qrow);
-        TextView qd = ui.text(live
+        TextView qd = ui.text(curQ == 4
+                ? "自定义：" + FrStreamHooks.customSummary(game) + "（再点“自定义”可修改）"
+                : live
                 ? "流畅 8M · 标准 20M · 高清 35M · 超清 60M（码率上限）\n分辨率跟随电脑屏幕；切换不断线，网络变差时自动降码率"
                 : "720P·8M · 1080P·20M · 2K·35M · 4K·60M\n码率超过电脑宽带的上行速度会大量丢帧；卡了就降一档", 11.5f, 0x80FFFFFF, false);
         qd.setPadding(ui.dp(8), 0, ui.dp(6), ui.dp(8));
@@ -770,7 +773,8 @@ public final class FrStreamOverlay {
         JsonObject info = FrHub.get(game).deviceInfo(host);
         if (info == null || !info.has("Displays") || !info.get("Displays").isJsonArray()) return out;
         JsonArray arr = info.getAsJsonArray("Displays");
-        String current = info.has("CurrentDisplay") && !info.get("CurrentDisplay").isJsonNull() ? info.get("CurrentDisplay").getAsString() : "";
+        String current = CURRENT.containsKey(host) ? CURRENT.get(host)
+                : info.has("CurrentDisplay") && !info.get("CurrentDisplay").isJsonNull() ? info.get("CurrentDisplay").getAsString() : "";
         int i = 1;
         for (JsonElement el : arr) {
             JsonObject d = el.getAsJsonObject();
@@ -789,13 +793,193 @@ public final class FrStreamOverlay {
         return out;
     }
 
+    /** 每台电脑上一次切到的屏幕（以手机这边为准：电脑端报的“当前”可能滞后） */
+    private static final java.util.Map<String, String> CURRENT = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 和控制中心同样风格的居中面板 */
+    private LinearLayout showPanel(String title) {
+        closeSheet();
+        scrim = new View(game);
+        scrim.setBackgroundColor(0x66000000);
+        scrim.setOnClickListener(v -> closeSheet());
+        root.addView(scrim, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        LinearLayout box = ui.col();
+        box.setBackground(Ui.round(0xF21C1C1E, ui.dp(30)));
+        box.setPadding(ui.dp(18), ui.dp(16), ui.dp(18), ui.dp(18));
+        box.setClickable(true);
+        TextView t = ui.text(title, 17, Color.WHITE, true);
+        t.setPadding(ui.dp(4), 0, 0, ui.dp(12));
+        box.addView(t);
+        android.widget.ScrollView sv = new android.widget.ScrollView(game);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.addView(box);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+        lp.setMargins(ui.dp(12), ui.dp(16), ui.dp(12), ui.dp(16));
+        int maxW = ui.dp(640);
+        if (root.getWidth() > maxW + ui.dp(24)) lp.width = maxW;
+        root.addView(sv, lp);
+        sheet = sv;
+        return box;
+    }
+
+    /** 切换屏幕：直接看每块屏的画面选（电脑端 0.20 起）；拿不到画面就退回文字列表 */
     private void pickDisplay(List<String[]> ds) {
+        LinearLayout box = showPanel("切换屏幕");
+        TextView wait = ui.text("正在读取屏幕画面…", 14, 0x99FFFFFF, false);
+        wait.setPadding(ui.dp(4), ui.dp(8), 0, ui.dp(8));
+        box.addView(wait);
+        new Thread(() -> {
+            JsonObject shots = FrHub.get(game).displayShots(host);
+            game.runOnUiThread(() -> {
+                if (sheet == null) return;
+                box.removeView(wait);
+                if (shots == null || !shots.has("Displays") || shots.getAsJsonArray("Displays").size() == 0) { pickDisplayList(ds); return; }
+                String cur = CURRENT.containsKey(host) ? CURRENT.get(host)
+                        : (shots.has("Current") && !shots.get("Current").isJsonNull() ? shots.get("Current").getAsString() : "");
+                LinearLayout row = ui.row();
+                for (JsonElement el : shots.getAsJsonArray("Displays")) {
+                    JsonObject d = el.getAsJsonObject();
+                    String id = d.get("Id").getAsString();
+                    String name = d.get("Name").getAsString();
+                    if (name.contains("VDD")) continue;
+                    int idx = d.has("StreamIndex") ? d.get("StreamIndex").getAsInt() : -1;
+                    boolean isCur = id.equals(cur);
+                    LinearLayout card = ui.col();
+                    card.setBackground(Ui.round(isCur ? ui.accent : 0xFF2C2C2E, ui.dp(16)));
+                    card.setPadding(ui.dp(6), ui.dp(6), ui.dp(6), ui.dp(8));
+                    ImageView iv = new ImageView(game);
+                    iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                    iv.setAdjustViewBounds(true);
+                    if (d.has("Jpg") && !d.get("Jpg").isJsonNull()) {
+                        byte[] b = android.util.Base64.decode(d.get("Jpg").getAsString(), android.util.Base64.DEFAULT);
+                        android.graphics.Bitmap bm = android.graphics.BitmapFactory.decodeByteArray(b, 0, b.length);
+                        if (bm != null) iv.setImageBitmap(bm);
+                    }
+                    card.addView(iv, new LinearLayout.LayoutParams(ui.dp(220), ViewGroup.LayoutParams.WRAP_CONTENT));
+                    boolean primary = d.has("Primary") && d.get("Primary").getAsBoolean();
+                    TextView l = ui.text((primary ? "主屏 · " : "") + name + (isCur ? "  ✓ 当前" : ""), 13, Color.WHITE, isCur);
+                    l.setPadding(ui.dp(4), ui.dp(6), ui.dp(4), 0);
+                    card.addView(l);
+                    if (d.has("Width") && d.get("Width").getAsInt() > 0) {
+                        TextView r = ui.text(d.get("Width").getAsInt() + "×" + d.get("Height").getAsInt(), 11.5f, 0x99FFFFFF, false);
+                        r.setPadding(ui.dp(4), ui.dp(2), ui.dp(4), 0);
+                        card.addView(r);
+                    }
+                    card.setOnClickListener(v -> { closeSheet(); if (!isCur) switchTo(id, idx); });
+                    LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    clp.rightMargin = ui.dp(10);
+                    row.addView(card, clp);
+                }
+                HorizontalScrollView hs = new HorizontalScrollView(game);
+                hs.setHorizontalScrollBarEnabled(false);
+                hs.addView(row);
+                box.addView(hs);
+                TextView hint = ui.text("点一下画面切换，画面不断开", 12, 0x80FFFFFF, false);
+                hint.setPadding(ui.dp(4), ui.dp(10), 0, 0);
+                box.addView(hint);
+            });
+        }, "FrDisplayShots").start();
+    }
+
+    /** 切到某块屏：知道序号就用 Sunshine 快捷键当场切（不断线），否则改设置重启后重连 */
+    private void switchTo(String id, int idx) {
+        NvConnection c = conn();
+        CURRENT.put(host, id);
+        if (idx >= 0 && idx < 12 && c != null) {
+            new Thread(() -> {
+                FrStreamHooks.sendCombo(c, com.limelight.binding.input.KeyboardTranslator.VK_F1 + idx);
+                FrHub.get(game).rememberDisplay(host, id);
+            }, "FrSwitchDisplay").start();
+            Toast.makeText(game, "已切换屏幕", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(game, "正在切换屏幕，约 5 秒后自动重连", Toast.LENGTH_LONG).show();
+        new Thread(() -> {
+            String err = FrHub.get(game).switchDisplay(host, id);
+            game.runOnUiThread(() -> {
+                if (err != null) { Toast.makeText(game, "切换失败：" + err, Toast.LENGTH_LONG).show(); return; }
+                FrStreamHooks.setPendingReconnect(host);
+                game.finish();
+            });
+        }).start();
+    }
+
+    /** 自定义画质：分辨率 / 帧率 / 码率（和电脑端一样）。只改码率时无缝生效，改了分辨率或帧率要重连几秒 */
+    private void showCustomQuality() {
+        LinearLayout box = showPanel("自定义画质");
+        final int[] res = {FrStreamHooks.customRes(game)};
+        final int[] fps = {FrStreamHooks.customFps(game)};
+        final int[] kbps = {FrStreamHooks.customKbps(game)};
+
+        LinearLayout rr = ui.row();
+        rr.setPadding(ui.dp(4), ui.dp(4), 0, ui.dp(12));
+        rr.addView(ui.text("分辨率", 15, Color.WHITE, false), new LinearLayout.LayoutParams(ui.dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        rr.addView(ui.segmented(FrStreamHooks.CUSTOM_RES_NAMES, res[0], i -> res[0] = i, 0xFF2C2C2E, ui.accent, 0xCCFFFFFF, Color.WHITE),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        box.addView(rr);
+
+        String[] fpsNames = new String[FrStreamHooks.CUSTOM_FPS.length];
+        int fpsIdx = 1;
+        for (int i = 0; i < fpsNames.length; i++) { fpsNames[i] = String.valueOf(FrStreamHooks.CUSTOM_FPS[i]); if (FrStreamHooks.CUSTOM_FPS[i] == fps[0]) fpsIdx = i; }
+        LinearLayout fr = ui.row();
+        fr.setPadding(ui.dp(4), 0, 0, ui.dp(12));
+        fr.addView(ui.text("帧率", 15, Color.WHITE, false), new LinearLayout.LayoutParams(ui.dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        fr.addView(ui.segmented(fpsNames, fpsIdx, i -> fps[0] = FrStreamHooks.CUSTOM_FPS[i], 0xFF2C2C2E, ui.accent, 0xCCFFFFFF, Color.WHITE),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        box.addView(fr);
+
+        LinearLayout br = ui.row();
+        br.setPadding(ui.dp(4), 0, 0, ui.dp(4));
+        br.addView(ui.text("码率", 15, Color.WHITE, false), new LinearLayout.LayoutParams(ui.dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView bv = ui.text(kbps[0] / 1000 + " Mbps", 15, Color.WHITE, true);
+        android.widget.SeekBar sb = new android.widget.SeekBar(game);
+        sb.setMax(99); // 1~100 Mbps
+        sb.setProgress(Math.max(0, Math.min(99, kbps[0] / 1000 - 1)));
+        sb.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(android.widget.SeekBar s, int p, boolean u) { kbps[0] = (p + 1) * 1000; bv.setText((p + 1) + " Mbps"); }
+            @Override public void onStartTrackingTouch(android.widget.SeekBar s) { }
+            @Override public void onStopTrackingTouch(android.widget.SeekBar s) { }
+        });
+        br.addView(sb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        br.addView(bv, new LinearLayout.LayoutParams(ui.dp(84), ViewGroup.LayoutParams.WRAP_CONTENT));
+        box.addView(br);
+        TextView tip = ui.text("码率要低于电脑那边宽带的上行速度；开着码率自适应时它是上限，网络不好会自动往下调。", 12, 0x80FFFFFF, false);
+        tip.setPadding(ui.dp(4), ui.dp(4), 0, ui.dp(14));
+        box.addView(tip);
+
+        TextView ok = ui.text("应用", 16, Color.WHITE, true);
+        ok.setGravity(Gravity.CENTER);
+        ok.setBackground(ui.press(ui.accent, ui.dp(14)));
+        ok.setPadding(0, ui.dp(12), 0, ui.dp(12));
+        ok.setOnClickListener(v -> {
+            FrStreamHooks.setCustom(game, res[0], fps[0], kbps[0]);
+            closeSheet();
+            // 这次串流的分辨率、帧率都没变，又开着码率自适应：只改码率上限，画面不断
+            int[] want = res[0] == 0 ? FrStreamHooks.adaptiveResolution(game, host) : null;
+            boolean sameRes = res[0] == 0 && (want == null || Math.max(want[0], want[1]) == Math.max(FrStreamHooks.streamW, FrStreamHooks.streamH));
+            boolean live = com.limelight.nvstream.jni.MoonBridge.farloopGetBitrateKbps() > 0;
+            if (live && sameRes && fps[0] == FrStreamHooks.streamFps) {
+                com.limelight.nvstream.jni.MoonBridge.farloopSetCap(kbps[0]);
+                Toast.makeText(game, "已应用：码率上限 " + kbps[0] / 1000 + "M", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            Toast.makeText(game, "已保存：" + FrStreamHooks.customSummary(game) + "，几秒后自动重连", Toast.LENGTH_LONG).show();
+            FrStreamHooks.setPendingReconnect(host);
+            game.finish();
+        });
+        box.addView(ok, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** 旧版电脑端（拿不到屏幕画面）：文字列表 */
+    private void pickDisplayList(List<String[]> ds) {
+        closeSheet();
         String[] labels = new String[ds.size()];
         for (int i = 0; i < ds.size(); i++) labels[i] = ds.get(i)[1];
         new AlertDialog.Builder(game).setTitle("切换被控端屏幕").setItems(labels, (d, which) -> {
             closeSheet();
             String id = ds.get(which)[0];
             int idx = Integer.parseInt(ds.get(which)[2]);
+            if (true) { switchTo(id, idx); return; }
             NvConnection c = conn();
             if (idx >= 0 && idx < 12 && c != null) {
                 // 画面不断：Sunshine 自带的快捷键 Ctrl+Alt+Shift+F(序号+1) 当场换采集的屏幕，再告诉电脑记下来（下次连接还在这块屏）

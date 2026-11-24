@@ -488,7 +488,7 @@ public class HomeActivity extends Activity {
             sb.append("虚拟 IP ").append(cfg.virtualIp()).append("  已知电脑 ").append(cfg.knownHosts()).append("\n\n");
             sb.append(FrNet.diagnose(cfg.virtualIp())).append("\n\n");
             try {
-                Process pr = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-v", "time", "--pid=" + android.os.Process.myPid()});
+                Process pr = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-v", "time", "--uid=" + android.os.Process.myUid()});
                 java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(pr.getInputStream()));
                 java.util.ArrayDeque<String> last = new java.util.ArrayDeque<>();
                 for (String line; (line = r.readLine()) != null; ) {

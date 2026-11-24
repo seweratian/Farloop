@@ -795,6 +795,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         } else {
             com.limelight.nvstream.jni.MoonBridge.farloopSetCap(0);
         }
+        com.freeremote.FrStreamHooks.noteStream(displayWidth, displayHeight, Math.round(prefConfig.fps));
 
         StreamConfiguration config = new StreamConfiguration.Builder()
                 .setResolution(
@@ -3531,6 +3532,15 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                     spinner = null;
                 }
 
+                if (!displayedFailureDialog && com.freeremote.FrStreamHooks.shouldAutoRetry(host)) {
+                    // Farloop：偶尔第一次连不上（如“无法连接 DESKTOP-xxx”），再连就好 —— 自动重试一次，不弹错误框
+                    displayedFailureDialog = true;
+                    LimeLog.severe(stage + " failed: " + errorCode + "，自动重试");
+                    Toast.makeText(Game.this, "连接没成功，正在自动重试…", Toast.LENGTH_SHORT).show();
+                    com.freeremote.FrStreamHooks.setPendingReconnect(host);
+                    finish();
+                    return;
+                }
                 if (!displayedFailureDialog) {
                     displayedFailureDialog = true;
                     LimeLog.severe(stage + " failed: " + errorCode);

@@ -45,7 +45,7 @@ public final class FrStreamHooks {
      * 画质档位只改码率上限，切档不用重连
      */
     public static int[] adaptiveResolution(android.content.Context c, String host) {
-        if (quality(c) >= QUALITY.length) return null; // 自定义：完全按设置来
+        if (quality(c) >= QUALITY.length && customRes(c) != 0) return null; // 自定义且指定了分辨率：按指定的来
         com.google.gson.JsonObject info = FrHub.get(c).deviceInfo(host);
         if (info == null || !info.has("Displays") || !info.get("Displays").isJsonArray()) return null;
         String cur = info.has("CurrentDisplay") && !info.get("CurrentDisplay").isJsonNull() ? info.get("CurrentDisplay").getAsString() : "";
@@ -63,8 +63,53 @@ public final class FrStreamHooks {
         return new int[]{w, h};
     }
 
+    // ---- 自定义档（第 5 档）：分辨率（0 = 跟随电脑，1~4 = 720P/1080P/2K/4K）、帧率、码率 ----
+    public static final String[] CUSTOM_RES_NAMES = {"跟随电脑", "720P", "1080P", "2K", "4K"};
+    public static final int[] CUSTOM_FPS = {30, 60, 90, 120};
+
+    private static android.content.SharedPreferences sp(android.content.Context c) {
+        return c.getSharedPreferences("freeremote_stream", android.content.Context.MODE_PRIVATE);
+    }
+
+    public static int customRes(android.content.Context c) { return sp(c).getInt("custom_res", 0); }
+    public static int customFps(android.content.Context c) { return sp(c).getInt("custom_fps", 60); }
+    public static int customKbps(android.content.Context c) { return sp(c).getInt("custom_kbps", 20000); }
+
+    public static void setCustom(android.content.Context c, int res, int fps, int kbps) {
+        sp(c).edit().putInt("custom_res", res).putInt("custom_fps", fps).putInt("custom_kbps", kbps).putInt("quality", QUALITY.length).apply();
+    }
+
+    public static String customSummary(android.content.Context c) {
+        return CUSTOM_RES_NAMES[Math.max(0, Math.min(4, customRes(c)))] + " · " + customFps(c) + "fps · " + customKbps(c) / 1000 + "M";
+    }
+
+    /** 现在这次串流用的分辨率和帧率（自定义档改了这些才需要重连，只改码率可以无缝生效） */
+    public static volatile int streamW, streamH, streamFps;
+
+    public static void noteStream(int w, int h, int fps) { streamW = w; streamH = h; streamFps = fps; }
+
+    /** 画面开始失败（例如偶尔的“无法连接 DESKTOP-xxx”）：同一台电脑 60 秒内自动重试一次，不弹错误框 */
+    private static final java.util.Map<String, Long> lastAutoRetry = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static boolean shouldAutoRetry(String host) {
+        if (!FrHub.isFreeRemoteHost(host)) return false;
+        long now = System.currentTimeMillis();
+        Long last = lastAutoRetry.get(host);
+        if (last != null && now - last < 60_000) return false;
+        lastAutoRetry.put(host, now);
+        return true;
+    }
+
     public static void applyQuality(android.content.Context c, com.limelight.preferences.PreferenceConfiguration cfg) {
         int q = quality(c);
+        if (q == QUALITY.length) {
+            int r = customRes(c);
+            if (r >= 1 && r <= 4) { cfg.width = QUALITY[r - 1][0]; cfg.height = QUALITY[r - 1][1]; }
+            cfg.fps = customFps(c);
+            cfg.bitrate = customKbps(c);
+            cfg.meteredBitrate = cfg.bitrate;
+            return;
+        }
         if (q < 0 || q >= QUALITY.length) return;
         cfg.width = QUALITY[q][0];
         cfg.height = QUALITY[q][1];

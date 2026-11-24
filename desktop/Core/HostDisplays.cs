@@ -89,6 +89,46 @@ public static class HostDisplays
         return list.OrderByDescending(d => d.Primary).ThenBy(d => d.DeviceName).ToList();
     }
 
+    /// <summary>每块屏幕的缩略图（宽 480 的 JPEG），“切换屏幕”时手机直接看画面选；还带上现在串流的是哪块</summary>
+    public static DisplayShotsMsg Shots()
+    {
+        var list = List();
+        var screens = System.Windows.Forms.Screen.AllScreens;
+        var shots = new List<DisplayShot>();
+        foreach (var d in list)
+        {
+            string? jpg = null;
+            var sc = screens.FirstOrDefault(s => s.DeviceName.Equals(d.DeviceName, StringComparison.OrdinalIgnoreCase));
+            if (sc != null)
+            {
+                try
+                {
+                    var b = sc.Bounds;
+                    using var full = new Bitmap(b.Width, b.Height);
+                    using (var g = Graphics.FromImage(full)) g.CopyFromScreen(b.Left, b.Top, 0, 0, b.Size);
+                    int w = 480, h = Math.Max(1, b.Height * w / Math.Max(1, b.Width));
+                    using var small = new Bitmap(w, h);
+                    using (var g = Graphics.FromImage(small))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(full, 0, 0, w, h);
+                    }
+                    using var ms = new MemoryStream();
+                    var enc = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(e => e.MimeType == "image/jpeg");
+                    var ps = new System.Drawing.Imaging.EncoderParameters(1) { Param = { [0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 60L) } };
+                    small.Save(ms, enc, ps);
+                    jpg = Convert.ToBase64String(ms.ToArray());
+                }
+                catch (Exception e) { Log.Info("屏幕缩略图失败：" + e.Message); }
+            }
+            shots.Add(new DisplayShot(d.Id, d.Name, d.Primary, d.Width, d.Height, d.StreamIndex, jpg));
+        }
+        // 现在串流的是哪块：息屏中按虚拟屏主屏算；否则 output_name（空 = 主屏）
+        var cur = VirtualDisplay.IsActive ? "" : CurrentId();
+        if (cur == "") cur = list.FirstOrDefault(x => x.Primary)?.Id ?? "";
+        return new DisplayShotsMsg(shots.ToArray(), cur);
+    }
+
     static (List<string> Names, DateTime At) _dxgi = (new(), DateTime.MinValue);
 
     /// <summary>屏幕增减后（进入 / 退出息屏）重新取 Sunshine 的显示器顺序</summary>
