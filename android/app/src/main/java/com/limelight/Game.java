@@ -785,6 +785,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         android.util.Size frSize = farloopStreamSize(prefConfig);
         displayWidth = frSize.getWidth();
         displayHeight = frSize.getHeight();
+        frCurW = displayWidth;
+        frCurH = displayHeight;
         if (frAdaptiveOn) {
             com.limelight.nvstream.jni.MoonBridge.farloopSetCap(frBitrate);
             frBitrate = Math.max(frBitrate, com.freeremote.FrStreamHooks.ADAPTIVE_CEILING_KBPS);
@@ -1036,6 +1038,45 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         int[] hostSize = frAdaptiveOn ? com.freeremote.FrStreamHooks.adaptiveResolution(this, host) : null;
         if (hostSize == null) return new android.util.Size(w, h);
         return h > w ? new android.util.Size(hostSize[1], hostSize[0]) : new android.util.Size(hostSize[0], hostSize[1]);
+    }
+
+    /** 这次串流现在编码的尺寸（串流中改过分辨率后跟着变；开始时 = displayWidth × displayHeight） */
+    private int frCurW, frCurH;
+
+    public String frCurrentSizeLabel() {
+        return frCurW + "×" + frCurH;
+    }
+
+    /** 能不能串流中途改分辨率：被控端 Farloop 0.22 起、解码器支持自适应播放、H.264 / HEVC */
+    private boolean frLiveResizeAvailable() {
+        if (decoderRenderer == null || !decoderRenderer.isAdaptivePlayback()) return false;
+        int fmt = decoderRenderer.getActiveVideoFormat();
+        if ((fmt & (com.limelight.nvstream.jni.MoonBridge.VIDEO_FORMAT_MASK_H264 | com.limelight.nvstream.jni.MoonBridge.VIDEO_FORMAT_MASK_H265)) == 0) return false;
+        return com.freeremote.FrStreamHooks.liveResolution(this, host);
+    }
+
+    /**
+     * 让这次串流用设置里选的分辨率：已经是就不动；不是的话能不断线改就当场改（被控端按新尺寸重建编码器，第一帧是关键帧）。
+     * 解码器是按开始串流时的尺寸建的，所以只能改成不超过它的尺寸，宽高比保持开始时的（画面框按它定好了）。
+     * 返回 false = 这次只能重连
+     */
+    public boolean frApplySelectedSize() {
+        android.util.Size wanted = farloopStreamSize(PreferenceConfiguration.readPreferences(this));
+        int tw = displayWidth, th = displayHeight;
+        if (wanted.getWidth() != displayWidth || wanted.getHeight() != displayHeight) {
+            double s = (double) Math.min(wanted.getWidth(), wanted.getHeight()) / Math.min(displayWidth, displayHeight);
+            if (s > 1.001) return false; // 比开始时大
+            tw = (int) Math.round(displayWidth * s) & ~1;
+            th = (int) Math.round(displayHeight * s) & ~1;
+            if (tw < 320 || th < 240) return false;
+        }
+        if (tw == frCurW && th == frCurH) return true;
+        if (!frLiveResizeAvailable()) return false;
+        com.limelight.nvstream.jni.MoonBridge.farloopSetResolution(tw, th);
+        LimeLog.info("Farloop: live resolution " + frCurW + "x" + frCurH + " -> " + tw + "x" + th);
+        frCurW = tw;
+        frCurH = th;
+        return true;
     }
 
     public boolean matchesSelectedStreamSize() {

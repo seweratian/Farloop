@@ -422,6 +422,8 @@ public class MoonBridge {
     public static native void farloopSetCap(int kbps);
     // 串流中途改帧率（被控端 Farloop 0.21 起）
     public static native void farloopSetFps(int fps);
+    // 串流中途改分辨率（被控端 Farloop 0.22 起；不能超过开始串流时的尺寸，解码器按那个尺寸建的）
+    public static native void farloopSetResolution(int width, int height);
     // 当前让被控端用的码率（kbps），没开自适应时为 0
     public static native int farloopGetBitrateKbps();
     // 最近一帧在网络里排队的时长（毫秒）

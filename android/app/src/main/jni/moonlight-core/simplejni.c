@@ -229,6 +229,11 @@ Java_com_limelight_nvstream_jni_MoonBridge_farloopSetAdaptive(JNIEnv *env, jclas
 }
 
 JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_farloopSetResolution(JNIEnv *env, jclass clazz, jint width, jint height) {
+    LiFarloopSetResolution(width, height);
+}
+
+JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_farloopSetFps(JNIEnv *env, jclass clazz, jint fps) {
     LiFarloopSetFps(fps);
 }

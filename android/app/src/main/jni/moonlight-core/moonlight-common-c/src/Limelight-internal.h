@@ -124,6 +124,7 @@ void connectionDetectedFrameLoss(uint32_t startFrame, uint32_t endFrame);
 void farloopRateInit(void);
 int farloopRateTakePending(void);
 int farloopRateTakePendingFps(void);
+int farloopRateTakePendingResolution(void);
 void farloopRateOnFrame(uint64_t receiveMs, unsigned int ptsMs, uint16_t hostLatency, int bytes);
 void farloopRateOnFrameLoss(uint32_t count);
 void connectionReceivedCompleteFrame(uint32_t frameIndex);

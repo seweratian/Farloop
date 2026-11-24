@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
 
 /** FreeRemote 安卓端配置。格式与电脑端 AppConfig 一致（邀请码、节点列表、主机名编码）。 */
 public final class FrConfig {
-    public static final String VERSION = "0.21.3";
+    public static final String VERSION = "0.22.0";
 
     /** a 比 b 旧（与电脑端 PeerSession.IsOlder 相同） */
     public static boolean isOlder(String a, String b) {

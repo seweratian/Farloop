@@ -1375,7 +1375,8 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
         }
         return new DeviceInfoMsg(Config.DeviceName, Config.VirtualIp, l.Macs, l.Broadcast, l.GatewayMac, PeerSession.Version, displays, current,
             AdaptiveBitrate: Config.AllowControl && SunshineFarloop.Active,
-            LiveFramerate: Config.AllowControl && SunshineFarloop.Active); // 0.21 起内置的定制版 Sunshine 支持串流中途改帧率（0x55F1）
+            LiveFramerate: Config.AllowControl && SunshineFarloop.Active, // 0.21 起内置的定制版 Sunshine 支持串流中途改帧率（0x55F1）
+            LiveResolution: Config.AllowControl && SunshineFarloop.Active); // 0.22 起：串流中途改分辨率（0x55F2，编码器按新尺寸重建，不断线）
     }
 
     KnownDevice? Known(string ip) { lock (Config.KnownDevices) return Config.KnownDevices.FirstOrDefault(k => k.Ip == ip); }

@@ -27,7 +27,7 @@
 |---|---|---|
 | `desktop/` | Windows 端（C# / WPF，.NET 8） | MIT |
 | `android/` | 安卓端，基于 [Artemis](https://github.com/ClassicOldSong/moonlight-android)（Moonlight 安卓分支）改造 | **GPL-3.0**（继承自 Moonlight） |
-| `patches/sunshine/` | Sunshine 补丁：串流中途改码率（控制消息 0x55F0，NVENC 直接重配置） | GPL-3.0（Sunshine 的许可证） |
+| `patches/sunshine/` | Sunshine 补丁：串流中途改码率 / 帧率 / 分辨率（控制消息 0x55F0 / 0x55F1 / 0x55F2；码率、帧率由 NVENC 直接重配置，分辨率按新尺寸重建编码器） | GPL-3.0（Sunshine 的许可证） |
 | `patches/easytier/` | EasyTier 补丁：打洞加速、线路规则、STUN 改进等 | LGPL-3.0（EasyTier 的许可证） |
 | `tools/ratetest/` | 码率自适应控制器的离线仿真测试 | MIT |
 

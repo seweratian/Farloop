@@ -70,7 +70,7 @@ public enum MsgType : byte
 // Purpose：null/"control" = 远程控制会话；"info"/"wake" = 一次性的服务连接，问完就断，不算有人在控制
 public record HelloMsg(string Name, string Ip, string Nonce, string Version, string? Purpose = null, string? Platform = null);
 public record DeviceInfoMsg(string Name, string Ip, string[] Macs, string? Broadcast, string? GatewayMac, string Version,
-    HostDisplay[]? Displays = null, string? CurrentDisplay = null, bool AdaptiveBitrate = false, bool LiveFramerate = false);
+    HostDisplay[]? Displays = null, string? CurrentDisplay = null, bool AdaptiveBitrate = false, bool LiveFramerate = false, bool LiveResolution = false);
 public record SetDisplayMsg(string Id);
 public record DisplayShot(string Id, string Name, bool Primary, int Width, int Height, int StreamIndex, string? Jpg);
 public record DisplayShotsMsg(DisplayShot[] Displays, string Current);

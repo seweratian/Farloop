@@ -571,6 +571,8 @@ void LiFarloopSetAdaptive(bool enabled);
 void LiFarloopSetCap(int kbps);
 // Farloop: change the stream's frame rate mid-stream (host must run Farloop's Sunshine 0.21+)
 void LiFarloopSetFps(int fps);
+// Farloop: change the encoded resolution mid-stream (host must run Farloop's Sunshine 0.22+)
+void LiFarloopSetResolution(int width, int height);
 // Bitrate the host is currently asked to encode at (kbps), 0 when adaptive bitrate is off
 int LiFarloopGetBitrateKbps(void);
 // Network queueing delay of the latest frame (ms)

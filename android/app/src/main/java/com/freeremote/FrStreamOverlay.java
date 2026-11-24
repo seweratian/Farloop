@@ -954,19 +954,18 @@ public final class FrStreamOverlay {
         ok.setOnClickListener(v -> {
             FrStreamHooks.setCustom(game, res[0], fps[0], kbps[0]);
             closeSheet();
-            // 这次串流的分辨率、帧率都没变，又开着码率自适应：只改码率上限，画面不断
-            boolean sameRes = game.matchesSelectedStreamSize();
+            // 开着码率自适应（被控端是 Farloop 定制版 Sunshine）时，码率、帧率、分辨率都尽量当场生效，画面不断
             boolean live = com.limelight.nvstream.jni.MoonBridge.farloopGetBitrateKbps() > 0;
             boolean fpsSame = fps[0] == FrStreamHooks.streamFps;
             boolean fpsLive = fpsSame || FrStreamHooks.liveFramerate(game, host);
-            if (live && sameRes && fpsLive) {
-                // 分辨率没变：码率、帧率都当场生效，画面不断
+            // 分辨率：一样就不动；能当场改（不超过开始时的尺寸、手机解码器支持）就改，否则下面重连
+            if (live && fpsLive && game.frApplySelectedSize()) {
                 com.limelight.nvstream.jni.MoonBridge.farloopSetCap(kbps[0]);
                 if (!fpsSame) {
                     com.limelight.nvstream.jni.MoonBridge.farloopSetFps(fps[0]);
                     FrStreamHooks.streamFps = fps[0];
                 }
-                Toast.makeText(game, "已应用：" + fps[0] + "fps · 码率上限 " + kbps[0] / 1000 + "M", Toast.LENGTH_SHORT).show();
+                Toast.makeText(game, "已应用：" + game.frCurrentSizeLabel() + " · " + fps[0] + "fps · 码率上限 " + kbps[0] / 1000 + "M", Toast.LENGTH_SHORT).show();
                 return;
             }
             Toast.makeText(game, "已保存：" + FrStreamHooks.customSummary(game) + "，几秒后自动重连", Toast.LENGTH_LONG).show();

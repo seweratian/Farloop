@@ -1,13 +1,14 @@
 diff --git a/src/globals.h b/src/globals.h
-index 2c7ee9b..5da6931 100644
+index 2c7ee9b..df0599a 100644
 --- a/src/globals.h
 +++ b/src/globals.h
-@@ -57,6 +57,8 @@ namespace mail {
+@@ -57,6 +57,9 @@ namespace mail {
    MAIL(touch_port);  ///< Touch port.
    MAIL(idr);  ///< IDR.
    MAIL(invalidate_ref_frames);  ///< Invalidate ref frames.
 +  MAIL(set_bitrate);  ///< Farloop: change the encoder bitrate mid-stream (kbps).
 +  MAIL(set_framerate);  ///< Farloop: change the frame rate mid-stream (fps).
++  MAIL(set_resolution);  ///< Farloop: change the encoded resolution mid-stream ((width << 16) | height).
    MAIL(gamepad_feedback);  ///< Gamepad feedback.
    MAIL(hdr);  ///< HDR.
  #undef MAIL
@@ -200,30 +201,32 @@ index 151b8a6..46d5960 100644
        client_frame_rate_strict = DXGI_RATIONAL {static_cast<UINT>(fps.num), static_cast<UINT>(fps.den)};
      }
 diff --git a/src/stream.cpp b/src/stream.cpp
-index 1291c9c..1e9bd6a 100644
+index 1291c9c..aaa234d 100644
 --- a/src/stream.cpp
 +++ b/src/stream.cpp
-@@ -52,7 +52,9 @@ constexpr int IDX_RUMBLE_TRIGGER_DATA = 12;  ///< Control-stream message index f
+@@ -52,7 +52,10 @@ constexpr int IDX_RUMBLE_TRIGGER_DATA = 12;  ///< Control-stream message index f
  constexpr int IDX_SET_MOTION_EVENT = 13;  ///< Control-stream message index for set motion event.
  constexpr int IDX_SET_RGB_LED = 14;  ///< Control-stream message index for set rgb led.
  constexpr int IDX_SET_ADAPTIVE_TRIGGERS = 15;  ///< Control-stream message index for set adaptive triggers.
 -constexpr int IDX_SET_PLAYER_LEDS = 16;  ///< Control-stream message index for set player indicator LEDs.
 +constexpr int IDX_SET_PLAYER_LEDS = 16;
 +constexpr short FARLOOP_SET_BITRATE = 0x55F0;  ///< Farloop extension: payload = uint32 little-endian kbps.
-+constexpr short FARLOOP_SET_FRAMERATE = 0x55F1;  ///< Farloop extension: payload = uint32 little-endian fps.  ///< Control-stream message index for set player indicator LEDs.
++constexpr short FARLOOP_SET_FRAMERATE = 0x55F1;  ///< Farloop extension: payload = uint32 little-endian fps.
++constexpr short FARLOOP_SET_RESOLUTION = 0x55F2;  ///< Farloop extension: payload = uint32 little-endian width, uint32 little-endian height.  ///< Control-stream message index for set player indicator LEDs.
  
  static const short packetTypes[] = {
    0x0305,  // Start A
-@@ -513,6 +515,8 @@ namespace stream {
+@@ -513,6 +516,9 @@ namespace stream {
  
        safe::mail_raw_t::event_t<bool> idr_events;  ///< Event requesting an instantaneous decoder refresh frame.
        safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;  ///< Event carrying the reference-frame range to invalidate.
 +      safe::mail_raw_t::event_t<int> set_bitrate_events;  ///< Farloop: new encoder bitrate (kbps).
 +      safe::mail_raw_t::event_t<int> set_framerate_events;  ///< Farloop: new frame rate (fps).
++      safe::mail_raw_t::event_t<int> set_resolution_events;  ///< Farloop: new encoded resolution ((width << 16) | height).
  
        std::unique_ptr<platf::deinit_t> qos;  ///< Lifetime guard for video-socket QoS configuration.
      } video;  ///< Video worker thread state for the active stream.
-@@ -1209,6 +1213,29 @@ namespace stream {
+@@ -1209,6 +1215,51 @@ namespace stream {
        session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
      });
  
@@ -247,36 +250,61 @@ index 1291c9c..1e9bd6a 100644
 +      std::memcpy(&kbps, payload.data(), 4);
 +      kbps = util::endian::little(kbps);
 +      BOOST_LOG(debug) << "type [FARLOOP_SET_BITRATE] "sv << kbps << " kbps"sv;
++      if (kbps > 0) {
++        ::video::farloop_kbps_override = (int) kbps;
++      }
 +      session->video.set_bitrate_events->raise((int) kbps);
++    });
++
++    server->map(FARLOOP_SET_RESOLUTION, [&](session_t *session, const std::string_view &payload) {
++      if (payload.size() < 8) {
++        return;
++      }
++      std::uint32_t w, h;
++      std::memcpy(&w, payload.data(), 4);
++      std::memcpy(&h, payload.data() + 4, 4);
++      w = util::endian::little(w);
++      h = util::endian::little(h);
++      if (w < 320 || h < 240 || w > 8192 || h > 8192) {
++        BOOST_LOG(warning) << "Farloop: ignoring resolution "sv << w << 'x' << h;
++        return;
++      }
++      w &= ~1u;
++      h &= ~1u;
++      BOOST_LOG(info) << "Farloop: client requested resolution "sv << w << 'x' << h;
++      session->video.set_resolution_events->raise((int) ((w << 16) | h));
 +    });
 +
      server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
        BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
  
-@@ -2330,6 +2357,9 @@ namespace stream {
+@@ -2330,6 +2381,11 @@ namespace stream {
  
        session->video.idr_events = mail->event<bool>(mail::idr);
        session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
 +      session->video.set_bitrate_events = mail->event<int>(mail::set_bitrate);
 +      session->video.set_framerate_events = mail->event<int>(mail::set_framerate);
++      session->video.set_resolution_events = mail->event<int>(mail::set_resolution);
 +      ::video::farloop_fps_override = 0;  // 新的串流会话：按客户端这次请求的帧率
++      ::video::farloop_kbps_override = 0;
        session->video.lowseq = 0;
        session->video.ping_payload = launch_session.av_ping_payload;
        if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {
 diff --git a/src/video.cpp b/src/video.cpp
-index 843a19a..eb09a92 100644
+index 843a19a..1801bef 100644
 --- a/src/video.cpp
 +++ b/src/video.cpp
-@@ -45,6 +45,8 @@ extern "C" {
+@@ -45,6 +45,9 @@ extern "C" {
  using namespace std::literals;
  
  namespace video {
 +  std::atomic<int> farloop_fps_override {0};
++  std::atomic<int> farloop_kbps_override {0};
 +
  
    namespace {
      /**
-@@ -528,6 +530,41 @@ namespace video {
+@@ -528,6 +531,41 @@ namespace video {
        request_idr_frame();
      }
  
@@ -318,7 +346,7 @@ index 843a19a..eb09a92 100644
      avcodec_ctx_t avcodec_ctx;  ///< FFmpeg codec context owned by the encode session.
      std::unique_ptr<platf::avcodec_encode_device_t> device;  ///< Platform device used by the FFmpeg hardware encoder.
  
-@@ -597,6 +634,21 @@ namespace video {
+@@ -597,6 +635,21 @@ namespace video {
        }
      }
  
@@ -340,16 +368,28 @@ index 843a19a..eb09a92 100644
      /**
       * @brief Submit the next frame to NVENC and return the encoded payload.
       *
-@@ -2439,6 +2491,8 @@ namespace video {
+@@ -2412,6 +2465,10 @@ namespace video {
+     if (!session) {
+       return;
+     }
++    // Farloop: the encoder may be rebuilt mid-stream (resolution or display change); keep the client's latest bitrate
++    if (int k = farloop_kbps_override.load(); k > 0) {
++      session->set_bitrate(k);
++    }
+ 
+     // As a workaround for NVENC hangs and to generally speed up encoder reinit,
+     // we will complete the encoder teardown in a separate thread if supported.
+@@ -2439,6 +2496,9 @@ namespace video {
      auto packets = mail::man->queue<packet_t>(mail::video_packets);
      auto idr_events = mail->event<bool>(mail::idr);
      auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
 +    auto set_bitrate_events = mail->event<int>(mail::set_bitrate);
 +    auto set_framerate_events = mail->event<int>(mail::set_framerate);
++    auto set_resolution_events = mail->event<int>(mail::set_resolution);
  
      {
        // Load a dummy image into the AVFrame to ensure we have something to encode
-@@ -2460,6 +2514,28 @@ namespace video {
+@@ -2460,6 +2520,28 @@ namespace video {
          }
        }
  
@@ -378,8 +418,51 @@ index 843a19a..eb09a92 100644
        if (idr_events->peek()) {
          requested_idr_frame = true;
          idr_events->pop();
+@@ -2497,6 +2579,10 @@ namespace video {
+       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
+         break;
+       }
++      // Farloop: the client asked for a new resolution; capture_async rebuilds the encoder at the new size
++      if (set_resolution_events->peek() && frame_nr > 1) {
++        break;
++      }
+ 
+       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
+         BOOST_LOG(error) << "Could not encode video packet"sv;
+@@ -2900,6 +2986,7 @@ namespace video {
+ 
+     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
+     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
++    auto set_resolution_events = mail->event<int>(mail::set_resolution);
+ 
+     // Encoding takes place on this thread
+     platf::adjust_thread_priority(platf::thread_priority_e::high);
+@@ -2923,6 +3010,23 @@ namespace video {
+ 
+       auto &encoder = *chosen_encoder;
+ 
++      // Farloop: apply the newest requested resolution, and keep the client's mid-stream frame rate when rebuilding
++      while (set_resolution_events->peek()) {
++        if (auto r = set_resolution_events->pop(0ms)) {
++          int w = (*r >> 16) & 0xFFFF;
++          int h = *r & 0xFFFF;
++          if (w != config.width || h != config.height) {
++            BOOST_LOG(info) << "Farloop: encoder resolution "sv << config.width << 'x' << config.height << " -> "sv << w << 'x' << h;
++            config.width = w;
++            config.height = h;
++          }
++        }
++      }
++      if (int o = farloop_fps_override.load(); o > 0 && o != config.framerate) {
++        config.framerate = o;
++        config.framerateX100 = 0;
++      }
++
+       auto encode_device = make_encode_device(*display, encoder, config);
+       if (!encode_device) {
+         return;
 diff --git a/src/video.h b/src/video.h
-index 63f3cf5..1359ac1 100644
+index 63f3cf5..f5adbef 100644
 --- a/src/video.h
 +++ b/src/video.h
 @@ -5,6 +5,7 @@
@@ -390,18 +473,20 @@ index 63f3cf5..1359ac1 100644
  #include <chrono>
  #include <string_view>
  
-@@ -22,6 +23,10 @@ extern "C" {
+@@ -22,6 +23,12 @@ extern "C" {
  struct AVPacket;
  
  namespace video {
 +  /// Farloop: frame rate requested mid-stream by the client (0 = use the rate the stream started with).
 +  /// Read by the capture loop every frame; reset when a new streaming session starts.
 +  extern std::atomic<int> farloop_fps_override;
++  /// Farloop: latest bitrate (kbps) requested mid-stream by the client (0 = none); re-applied when the encoder is rebuilt.
++  extern std::atomic<int> farloop_kbps_override;
 +
  
    /**
     * @brief Encoding configuration requested by a remote client.
-@@ -449,6 +454,20 @@ namespace video {
+@@ -449,6 +456,20 @@ namespace video {
       * @param last_frame Last frame.
       */
      virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;

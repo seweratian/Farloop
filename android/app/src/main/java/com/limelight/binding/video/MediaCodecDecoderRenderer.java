@@ -528,6 +528,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         foreground = false;
     }
 
+    /** Farloop：解码器支持自适应播放（同一个解码器里换成不超过开始尺寸的分辨率，不用重建） */
+    public boolean isAdaptivePlayback() {
+        return adaptivePlayback;
+    }
+
     public int getActiveVideoFormat() {
         return this.videoFormat;
     }
