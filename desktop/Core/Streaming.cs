@@ -424,6 +424,41 @@ public static class Moonlight
     }
 
     public static Process StartPair(string ip, string pin) => Start("pair", ip, "--pin", pin);
+
+    /// <summary>
+    /// Moonlight 自己是不是已经和这台被控端配对过（它把主机记在 HKCU\Software\Moonlight Game Streaming Project\Moonlight\hosts\N，
+    /// 配对过的有 srvcert）。按被控端 Sunshine 的 uniqueid 认主机，所以被控端换了 IP 也认得出来。
+    /// Farloop 自己的“已配对”记录丢了（换 IP、清过记录）而 Moonlight 还记得时，再跑 moonlight pair 只会报“已经配对”然后失败。
+    /// </summary>
+    public static async Task<bool> IsPairedAsync(string ip)
+    {
+        try
+        {
+            string? uuid = null;
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+                var xml = await http.GetStringAsync($"http://{ip}:47989/serverinfo");
+                var m = System.Text.RegularExpressions.Regex.Match(xml, "<uniqueid>([^<]+)</uniqueid>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (m.Success) uuid = m.Groups[1].Value.Trim();
+            }
+            catch (Exception e) { Log.Info($"读取 {ip} 的 serverinfo 失败（按地址找 Moonlight 记录）：{e.Message}"); }
+
+            using var hosts = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Moonlight Game Streaming Project\Moonlight\hosts");
+            if (hosts == null) return false;
+            foreach (var n in hosts.GetSubKeyNames())
+            {
+                using var h = hosts.OpenSubKey(n);
+                if (h == null || string.IsNullOrEmpty(h.GetValue("srvcert") as string)) continue;
+                bool sameHost = uuid != null
+                    ? string.Equals(h.GetValue("uuid") as string, uuid, StringComparison.OrdinalIgnoreCase)
+                    : new[] { "localaddress", "remoteaddress", "manualaddress", "ipv6address" }.Any(k => (h.GetValue(k) as string) == ip);
+                if (sameHost) return true;
+            }
+        }
+        catch (Exception e) { Log.Error("读取 Moonlight 配对记录失败", e); }
+        return false;
+    }
     public static Process StartStream(string ip, StreamSettings s)
     {
         DisableConnectionWarnings();

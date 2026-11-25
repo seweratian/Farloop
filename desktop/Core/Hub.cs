@@ -784,6 +784,13 @@ public sealed class Hub : Observable, TransferManager.IHost, ClipboardSync.IHost
             var s = await GetSessionAsync(d.Ip);
 
             bool assist = s.IsAssist;
+            // Farloop 的记录里没有这台，但 Moonlight 自己还记得配对过（被控端换了 IP、清过记录等）：
+            // 不要再跑配对（Moonlight 会报“已经配对”然后失败），直接记上
+            if (!assist && !Config.PairedHosts.Contains(d.Ip) && await Moonlight.IsPairedAsync(d.Ip))
+            {
+                Log.Info($"{d.Name}（{d.Ip}）Moonlight 里已配对，跳过配对");
+                Config.PairedHosts.Add(d.Ip); Config.Save();
+            }
             if (assist ? !s.IsApproved : !Config.PairedHosts.Contains(d.Ip))
             {
                 d.Busy = assist ? "等待对方点“允许”…" : "首次连接，正在自动配对…";
