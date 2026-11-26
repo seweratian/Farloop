@@ -44,6 +44,24 @@ public static class B64
     }
 }
 
+public static class Sync
+{
+    /// <summary>
+    /// 在界面线程上同步等一个异步操作（卸载这类没有窗口可回的流程）。
+    /// 必须放到线程池里跑：直接 .Wait() / GetResult() 时，里面每个 await 都要回到界面线程继续，
+    /// 而界面线程正卡在等它，互相等死（0.23.0 及以前从“应用”或 Geek Uninstaller 卸载会一直卡住）。
+    /// 返回 false = 超时；操作抛的异常原样抛出。
+    /// </summary>
+    public static bool Run(Func<Task> work, int timeoutMs)
+    {
+        var t = Task.Run(work);
+        // 等完成但不抛（Task.Wait 会把异常包成 AggregateException），再用 GetResult 抛出原始异常
+        if (!((IAsyncResult)t).AsyncWaitHandle.WaitOne(timeoutMs)) return false;
+        t.GetAwaiter().GetResult();
+        return true;
+    }
+}
+
 public static class Proc
 {
     public static async Task<(int Code, string Output)> RunAsync(string exe, string args, int timeoutMs = 120_000, string? workDir = null)

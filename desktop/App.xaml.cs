@@ -134,7 +134,8 @@ public partial class App : Application
         {
             try { Task.Run(() => VirtualDisplay.UninstallAsync()).Wait(30000); } catch { }
             try { Task.Run(SunshineFarloop.RestoreAsync).Wait(60000); } catch { }
-            Installer.UninstallAsync(deleteData).GetAwaiter().GetResult();
+            if (!Sync.Run(() => Installer.UninstallAsync(deleteData), 180_000))
+                throw new TimeoutException("卸载步骤 3 分钟没有完成");
             if (!quiet) MessageBox.Show("Farloop 已卸载。", "卸载 Farloop", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
