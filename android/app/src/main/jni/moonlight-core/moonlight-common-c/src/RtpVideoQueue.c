@@ -540,6 +540,8 @@ uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue) {
 }
 
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
+    farloopFecOnPacket(packet->sequenceNumber); // Farloop：统计纠错之前的丢包
+
     if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
         // Reject packets behind our current buffer window
         return RTPF_RET_REJECTED;
@@ -701,6 +703,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         queue->reportedLostFrame = false;
         queue->bufferDataPackets = (nvPacket->fecInfo & 0xFFC00000) >> 22;
         queue->fecPercentage = (nvPacket->fecInfo & 0xFF0) >> 4;
+        farloopFecOnFramePercent((int)queue->fecPercentage);
         queue->bufferParityPackets = (queue->bufferDataPackets * queue->fecPercentage + 99) / 100;
         queue->bufferFirstParitySequenceNumber = U16(queue->bufferLowestSequenceNumber + queue->bufferDataPackets);
         queue->bufferHighestSequenceNumber = U16(queue->bufferFirstParitySequenceNumber + queue->bufferParityPackets - 1);

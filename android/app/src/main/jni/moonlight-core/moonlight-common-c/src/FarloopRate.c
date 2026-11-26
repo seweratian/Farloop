@@ -74,7 +74,10 @@ static void frApply(void) {
     }
 }
 
+static void ffReset(void);
+
 static void frReset(void) {
+    ffReset();
     frMinCount = 0;
     frSampleHead = frSampleCount = 0;
     frBytes = 0;
@@ -326,4 +329,147 @@ void farloopRateOnFrameLoss(uint32_t count) {
     if (!frEnabled) return;
     if (count > 1000) count = 1000;
     frLostFrames += count;
+}
+
+// ---------------------------------------------------------------------------
+// Farloop 自适应 FEC（0.23 起）
+//
+// Sunshine 默认固定加 20% 的纠错包：网好时白白多发两成，丢包重时又不够。
+// 这里按实测丢包率定比例（档位参考 CrossDesk/MiniRTC 的做法），经控制通道发给被控端
+// （Farloop 改过的 Sunshine，消息 0x55F3，载荷 uint32 小端百分比）。
+//   丢包率 = 每个统计窗口里按 RTP 序号应收的包里没收到的比例（数据包和纠错包一起算，是纠错之前的丢包）。
+//   丢包 <0.5% → 5%（不降到 0：丢一个包就得等关键帧，画面会卡一下），<1.5% → 10%，<3% → 15%，
+//   <5% → 20%，<8% → 30%，更高 → 40%；有丢包且往返 ≥100 ms 或连着丢 ≥3 个包时再加 10%。
+//   往上加：连续 2 个窗口都要求更高才加（丢包 ≥5% 时 1 个窗口就加）；往下减：连续 3 个窗口都要求更低才减。
+//   网络在排队（码率控制正在降）而丢包不到 2% 时不加：丢包是堵出来的，多发纠错包只会更堵。
+// 被控端真的换了比例（从视频包头里看到）之后，视频码率按比例反向调整，让总流量不变；
+// 发出去 5 秒还没看到变化 = 被控端不认这条消息（旧版），之后不再发。
+#define FF_WINDOW_MS 1000
+#define FF_MAX_WINDOW_MS 5000
+#define FF_MIN_PACKETS 200
+#define FF_MIN 5
+#define FF_MAX 50
+
+static bool ffStarted;
+static uint16_t ffBase, ffHigh;
+static uint32_t ffRecv, ffMaxRun;
+static uint64_t ffStart;
+static int ffWant;              // 我们要的比例（0 = 还不知道被控端现在用多少）
+static int ffHost;              // 视频包头里看到的被控端当前比例（0 = 还没看到）
+static int ffCand, ffCandCount; // 待确认的新比例，和已经连续几个窗口要求过
+static uint64_t ffSentAt;
+static int ffSent;
+static bool ffUnsupported;
+static volatile int ffPending;
+static volatile int ffShown;
+static volatile int ffLossPermille;
+
+static void ffReset(void) {
+    ffStarted = false;
+    ffRecv = ffMaxRun = 0;
+    ffWant = ffHost = 0;
+    ffCand = ffCandCount = 0;
+    ffSentAt = 0;
+    ffSent = 0;
+    ffUnsupported = false;
+    ffPending = 0;
+    ffShown = 0;
+    ffLossPermille = 0;
+}
+
+// 丢包率 → 比例（单独拿出来，方便测试）
+int farloopFecBand(double p, uint32_t maxRun, double srtt) {
+    int d = p < 0.005 ? 5 : p < 0.015 ? 10 : p < 0.03 ? 15 : p < 0.05 ? 20 : p < 0.08 ? 30 : 40;
+    if (p >= 0.005 && (srtt >= 100 || maxRun >= 3)) d += 10;
+    if (d < FF_MIN) d = FF_MIN;
+    if (d > FF_MAX) d = FF_MAX;
+    return d;
+}
+
+static void ffWindow(uint32_t expected, uint32_t received, uint32_t maxRun, uint64_t now) {
+    double p = received >= expected ? 0 : (double)(expected - received) / expected;
+    ffLossPermille = (int)(p * 1000 + 0.5);
+    if (ffUnsupported || ffWant <= 0) return;
+    if (ffSent > 0 && ffHost != ffSent && now - ffSentAt > 5000) {
+        ffUnsupported = true;
+        ffShown = 0;
+        Limelog("Farloop: host ignores FEC changes (still %d%%), adaptive FEC off\n", ffHost);
+        return;
+    }
+    uint32_t rtt = 0, rttVar = 0;
+    double srtt = LiGetEstimatedRttInfo(&rtt, &rttVar) ? rtt : 100.0;
+    int desired = farloopFecBand(p, maxRun, srtt);
+    if (desired > ffWant && p < 0.02 && frLastQueueMs > FR_QUEUE_HIGH_MS) desired = ffWant;
+    if (desired == ffWant) { ffCand = ffCandCount = 0; return; }
+    bool up = desired > ffWant;
+    if (ffCand == 0 || (ffCand > ffWant) != up) { ffCand = desired; ffCandCount = 0; }
+    else if (desired > ffCand) ffCand = desired; // 几次要求里取最高的（往下减时也是最保守的那个）
+    ffCandCount++;
+    if ((up && (ffCandCount >= 2 || p >= 0.05)) || (!up && ffCandCount >= 3)) {
+        Limelog("Farloop: FEC %d%% -> %d%% (loss %.2f%%, max run %u, rtt %.0f ms)\n", ffWant, ffCand, p * 100, maxRun, srtt);
+        ffWant = ffCand;
+        ffCand = ffCandCount = 0;
+        ffPending = ffWant;
+    }
+}
+
+// 每个收到的视频 RTP 包（RtpVideoQueue 调用，序号已是本机字节序）
+void farloopFecOnPacket(uint16_t seq) {
+    if (!frEnabled || ffUnsupported) return;
+    uint64_t now = PltGetMillis();
+    if (!ffStarted) {
+        ffStarted = true;
+        ffBase = ffHigh = seq;
+        ffRecv = 1;
+        ffMaxRun = 0;
+        ffStart = now;
+        return;
+    }
+    int16_t d = (int16_t)(uint16_t)(seq - ffHigh);
+    if (d > 0) {
+        if ((uint32_t)(d - 1) > ffMaxRun) ffMaxRun = (uint32_t)(d - 1);
+        ffHigh = seq;
+    }
+    ffRecv++;
+    uint32_t expected = (uint32_t)(uint16_t)(ffHigh - ffBase) + 1;
+    uint64_t span = now - ffStart;
+    if ((span >= FF_WINDOW_MS && expected >= FF_MIN_PACKETS) || span >= FF_MAX_WINDOW_MS || expected >= 20000) {
+        if (expected >= 50) ffWindow(expected, ffRecv, ffMaxRun, now);
+        ffStarted = false;
+    }
+}
+
+// 新的一帧的 FEC 比例（视频包头里的；0 = 这一帧太大，被控端没加纠错）
+void farloopFecOnFramePercent(int pct) {
+    if (!frEnabled || pct <= 0 || pct == ffHost) return;
+    int old = ffHost;
+    ffHost = pct;
+    if (!ffUnsupported) ffShown = pct;
+    if (ffWant <= 0) { ffWant = pct; return; } // 开始串流：被控端配置里的比例
+    if (old > 0) {
+        // 纠错包占比变了：视频码率按比例反向调，总流量不变
+        double next = frEstimate * (100.0 + old) / (100.0 + pct);
+        if (next > frTargetKbps) next = frTargetKbps;
+        if (next < frFloor()) next = frFloor();
+        frEstimate = next;
+        frApply();
+    }
+}
+
+int farloopRateTakePendingFec(void) {
+    if (!frEnabled || ffUnsupported || !IS_SUNSHINE()) return 0;
+    int f = ffPending;
+    if (f <= 0) return 0;
+    ffPending = 0;
+    ffSent = f;
+    ffSentAt = PltGetMillis();
+    return f;
+}
+
+int LiFarloopGetFecPercent(void) {
+    return frEnabled ? ffShown : 0;
+}
+
+int LiFarloopGetPacketLossPermille(void) {
+    return frEnabled ? ffLossPermille : 0;
 }

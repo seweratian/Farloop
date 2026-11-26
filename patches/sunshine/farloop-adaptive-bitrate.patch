@@ -201,10 +201,10 @@ index 151b8a6..46d5960 100644
        client_frame_rate_strict = DXGI_RATIONAL {static_cast<UINT>(fps.num), static_cast<UINT>(fps.den)};
      }
 diff --git a/src/stream.cpp b/src/stream.cpp
-index 1291c9c..aaa234d 100644
+index 1291c9c..0123cf1 100644
 --- a/src/stream.cpp
 +++ b/src/stream.cpp
-@@ -52,7 +52,10 @@ constexpr int IDX_RUMBLE_TRIGGER_DATA = 12;  ///< Control-stream message index f
+@@ -52,7 +52,12 @@ constexpr int IDX_RUMBLE_TRIGGER_DATA = 12;  ///< Control-stream message index f
  constexpr int IDX_SET_MOTION_EVENT = 13;  ///< Control-stream message index for set motion event.
  constexpr int IDX_SET_RGB_LED = 14;  ///< Control-stream message index for set rgb led.
  constexpr int IDX_SET_ADAPTIVE_TRIGGERS = 15;  ///< Control-stream message index for set adaptive triggers.
@@ -212,11 +212,13 @@ index 1291c9c..aaa234d 100644
 +constexpr int IDX_SET_PLAYER_LEDS = 16;
 +constexpr short FARLOOP_SET_BITRATE = 0x55F0;  ///< Farloop extension: payload = uint32 little-endian kbps.
 +constexpr short FARLOOP_SET_FRAMERATE = 0x55F1;  ///< Farloop extension: payload = uint32 little-endian fps.
++static std::atomic<int> farloop_fec_override {0};  ///< Farloop: FEC percentage chosen by the client (0 = use config).
++constexpr short FARLOOP_SET_FEC = 0x55F3;  ///< Farloop extension: payload = uint32 little-endian FEC percentage (1-100).
 +constexpr short FARLOOP_SET_RESOLUTION = 0x55F2;  ///< Farloop extension: payload = uint32 little-endian width, uint32 little-endian height.  ///< Control-stream message index for set player indicator LEDs.
  
  static const short packetTypes[] = {
    0x0305,  // Start A
-@@ -513,6 +516,9 @@ namespace stream {
+@@ -513,6 +518,9 @@ namespace stream {
  
        safe::mail_raw_t::event_t<bool> idr_events;  ///< Event requesting an instantaneous decoder refresh frame.
        safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;  ///< Event carrying the reference-frame range to invalidate.
@@ -226,7 +228,7 @@ index 1291c9c..aaa234d 100644
  
        std::unique_ptr<platf::deinit_t> qos;  ///< Lifetime guard for video-socket QoS configuration.
      } video;  ///< Video worker thread state for the active stream.
-@@ -1209,6 +1215,51 @@ namespace stream {
+@@ -1209,6 +1217,62 @@ namespace stream {
        session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
      });
  
@@ -256,6 +258,17 @@ index 1291c9c..aaa234d 100644
 +      session->video.set_bitrate_events->raise((int) kbps);
 +    });
 +
++    server->map(FARLOOP_SET_FEC, [&](session_t *session, const std::string_view &payload) {
++      if (payload.size() < 4) {
++        return;
++      }
++      std::uint32_t pct;
++      std::memcpy(&pct, payload.data(), 4);
++      pct = std::clamp<std::uint32_t>(util::endian::little(pct), 1, 100);
++      BOOST_LOG(info) << "Farloop: client requested FEC "sv << pct << '%';
++      farloop_fec_override = (int) pct;
++    });
++
 +    server->map(FARLOOP_SET_RESOLUTION, [&](session_t *session, const std::string_view &payload) {
 +      if (payload.size() < 8) {
 +        return;
@@ -278,7 +291,20 @@ index 1291c9c..aaa234d 100644
      server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
        BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
  
-@@ -2330,6 +2381,11 @@ namespace stream {
+@@ -1595,7 +1659,11 @@ namespace stream {
+         frame_header.frame_processing_latency = 0;
+       }
+ 
+-      auto fecPercentage = config::stream.fec_percentage;
++      // Farloop：控制端按实测丢包定的 FEC 比例（没定过就用配置里的）
++      int fecPercentage = farloop_fec_override.load();
++      if (fecPercentage <= 0) {
++        fecPercentage = config::stream.fec_percentage;
++      }
+ 
+       // Insert space for packet headers
+       auto blocksize = session->config.packetsize + MAX_RTP_HEADER_SIZE;
+@@ -2330,6 +2398,12 @@ namespace stream {
  
        session->video.idr_events = mail->event<bool>(mail::idr);
        session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
@@ -287,6 +313,7 @@ index 1291c9c..aaa234d 100644
 +      session->video.set_resolution_events = mail->event<int>(mail::set_resolution);
 +      ::video::farloop_fps_override = 0;  // 新的串流会话：按客户端这次请求的帧率
 +      ::video::farloop_kbps_override = 0;
++      farloop_fec_override = 0;
        session->video.lowseq = 0;
        session->video.ping_payload = launch_session.av_ping_payload;
        if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {

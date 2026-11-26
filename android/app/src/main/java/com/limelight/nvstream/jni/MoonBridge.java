@@ -428,6 +428,10 @@ public class MoonBridge {
     public static native int farloopGetBitrateKbps();
     // 最近一帧在网络里排队的时长（毫秒）
     public static native int farloopGetQueueDelayMs();
+    // 自适应 FEC：被控端现在加的纠错包比例（%），没在调时为 0
+    public static native int farloopGetFecPercent();
+    // 最近一个统计窗口里纠错之前的丢包（千分比）
+    public static native int farloopGetPacketLossPermille();
 
     public static native byte guessControllerType(int vendorId, int productId);
 

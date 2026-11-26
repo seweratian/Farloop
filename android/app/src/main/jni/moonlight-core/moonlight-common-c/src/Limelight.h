@@ -573,6 +573,10 @@ void LiFarloopSetCap(int kbps);
 void LiFarloopSetFps(int fps);
 // Farloop: change the encoded resolution mid-stream (host must run Farloop's Sunshine 0.22+)
 void LiFarloopSetResolution(int width, int height);
+// Farloop: FEC percentage the host currently uses while adaptive FEC is active (0 = not active)
+int LiFarloopGetFecPercent(void);
+// Farloop: video packet loss before FEC recovery in the last window, per mille
+int LiFarloopGetPacketLossPermille(void);
 // Bitrate the host is currently asked to encode at (kbps), 0 when adaptive bitrate is off
 int LiFarloopGetBitrateKbps(void);
 // Network queueing delay of the latest frame (ms)

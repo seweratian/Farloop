@@ -1443,6 +1443,15 @@ static void lossStatsThreadFunc(void* context) {
                         Limelog("Farloop: frame rate -> %d fps\n", fps);
                     }
                 }
+                int fec = farloopRateTakePendingFec();
+                if (fec > 0) {
+                    uint32_t lp = LE32((uint32_t)fec);
+                    if (!sendMessageAndForget(0x55F3, sizeof(lp), &lp, CTRL_CHANNEL_URGENT, ENET_PACKET_FLAG_RELIABLE, false)) {
+                        Limelog("Farloop: sending FEC failed: %d\n", (int)LastSocketError());
+                    } else {
+                        Limelog("Farloop: FEC -> %d%%\n", fec);
+                    }
+                }
                 int kbps = farloopRateTakePending();
                 if (kbps > 0) {
                     uint32_t le = LE32((uint32_t)kbps);

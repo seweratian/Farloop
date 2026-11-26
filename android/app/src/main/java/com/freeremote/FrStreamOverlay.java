@@ -388,7 +388,13 @@ public final class FrStreamOverlay {
                 int kbps = com.limelight.nvstream.jni.MoonBridge.farloopGetBitrateKbps();
                 if (kbps > 0) {
                     int q = com.limelight.nvstream.jni.MoonBridge.farloopGetQueueDelayMs();
-                    qTitle.setText(String.format(java.util.Locale.ROOT, "画质 · 自适应 %.1fM · 排队 %d ms", kbps / 1000.0, q));
+                    int fec = com.limelight.nvstream.jni.MoonBridge.farloopGetFecPercent();
+                    String t = String.format(java.util.Locale.ROOT, "画质 · 自适应 %.1fM · 排队 %d ms", kbps / 1000.0, q);
+                    if (fec > 0) {
+                        int loss = com.limelight.nvstream.jni.MoonBridge.farloopGetPacketLossPermille();
+                        t += String.format(java.util.Locale.ROOT, " · 纠错 %d%% · 丢包 %.1f%%", fec, loss / 10.0);
+                    }
+                    qTitle.setText(t);
                 }
                 qTitle.postDelayed(this, 500);
             }

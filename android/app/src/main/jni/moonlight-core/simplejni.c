@@ -253,6 +253,16 @@ Java_com_limelight_nvstream_jni_MoonBridge_farloopGetQueueDelayMs(JNIEnv *env, j
     return LiFarloopGetQueueDelayMs();
 }
 
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_farloopGetFecPercent(JNIEnv *env, jclass clazz) {
+    return LiFarloopGetFecPercent();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_farloopGetPacketLossPermille(JNIEnv *env, jclass clazz) {
+    return LiFarloopGetPacketLossPermille();
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_getLaunchUrlQueryParameters(JNIEnv *env, jclass clazz) {
     return (*env)->NewStringUTF(env, LiGetLaunchUrlQueryParameters());
